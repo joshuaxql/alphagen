@@ -5,3 +5,15 @@ __pycache__/
 ai改进方法.md
 alphagen.pdf
 outputs_*/
+# 忽略所有数据集、Excel、CSV（你要的核心！）
+*.csv
+*.xlsx
+*.xls
+*.parquet
+*.jsonl
+*.zip
+*.tar
+*.gz
+data/
+dataset/
+datasets/
