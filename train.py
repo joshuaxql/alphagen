@@ -11,6 +11,7 @@
 import os
 import json
 import time
+from typing import List
 import numpy as np
 import torch
 
@@ -219,6 +220,18 @@ def evaluate_episode(
 
     formula = tree_to_formula(tree)
 
+    # 原始特征去重：同类型原始特征在池中最多只能有1个
+    raw_features = ["$close", "$open", "$high", "$low", "$vol", "$vwap"]
+    if formula.strip() in raw_features:
+        for existing_expr in combination.alpha_exprs:
+            if tree_to_formula(existing_expr).strip() == formula.strip():
+                return _result(
+                    -0.25,
+                    accepted=False,
+                    formula=formula,
+                    status="rejected_duplicate_raw",
+                )
+
     try:
         alpha_val = combination.calculator.evaluate(tree)
     except Exception:
@@ -241,10 +254,32 @@ def evaluate_episode(
 
     if combination.last_add_accepted:
         ic_delta = new_ic - old_ic
+
+        # 硬门槛：ic_delta必须严格大于1e-6，否则视为无效接受并回滚
+        if ic_delta <= 1e-6:
+            # 回滚：移除刚加入的因子
+            if combination.pool_size > 0:
+                combination.alpha_exprs.pop()
+                combination.alpha_values.pop()
+                combination.weights = combination.weights[:-1]
+                if combination.pool_size > 0:
+                    combination.ic_matrix = combination.ic_matrix[:-1, :-1]
+            return _result(
+                reward=-0.15,
+                accepted=False,
+                formula=formula,
+                candidate_ic=combination.last_add_candidate_ic,
+                ic_delta=ic_delta,
+                status="rejected_no_improve",
+            )
+
         icir_delta = combination.last_add_icir_delta
 
         # 计算候选 alpha 的 Rank IC（Spearman 相关系数）
         candidate_rank_ic = calc_rank_ic(alpha_val, combination.target)
+
+        # 基础方向奖励：鼓励正IC方向
+        direction_bonus = np.sign(combination.last_add_candidate_ic) * 0.5
 
         # 正负平衡奖励：如果新因子IC方向与多数池内因子相反，给奖励
         pos_count = sum(1 for ic in combination.ic_vector if ic > 0)
@@ -252,9 +287,9 @@ def evaluate_episode(
         balance_bonus = 0.0
         candidate_ic_sign = combination.last_add_candidate_ic
         if candidate_ic_sign > 0 and pos_count < neg_count:
-            balance_bonus = 0.05
+            balance_bonus = 1.0
         elif candidate_ic_sign < 0 and neg_count < pos_count:
-            balance_bonus = 0.05
+            balance_bonus = 1.0
 
         # 冗余惩罚：与已有因子相关性越高，惩罚越大
         redundancy_penalty = 0.0
@@ -268,13 +303,22 @@ def evaluate_episode(
             if max_mutual > 0.7:
                 redundancy_penalty = (max_mutual - 0.7) * 0.5
 
+        # 复杂度惩罚：严厉惩罚原始特征，轻微惩罚公式长度
+        raw_features = ["$close", "$open", "$high", "$low", "$vol", "$vwap"]
+        if formula.strip() in raw_features:
+            complexity_penalty = 5.0  # 严厉惩罚原始特征
+        else:
+            complexity_penalty = len(formula) / 200.0  # 轻微惩罚长度
+
         # 多目标奖励
         reward = (
-            10.0 * ic_delta        # IC增量（主目标）
+            50.0 * ic_delta        # IC增量（主目标，压倒性权重）
             + 3.0 * icir_delta     # ICIR增量（稳定性）
             + 2.0 * candidate_rank_ic  # Rank IC（鲁棒性）
-            + balance_bonus        # 正负平衡
+            + direction_bonus      # 基础方向奖励（鼓励正IC）
+            + balance_bonus        # 正负平衡（大幅增强）
             - redundancy_penalty   # 冗余惩罚
+            - complexity_penalty   # 复杂度惩罚
         )
 
         return _result(
@@ -353,6 +397,8 @@ def train(
         )
     best_score = -np.inf
     history = []
+    val_ic_history: List[float] = []  # P1: 跟踪验证IC历史
+    pool_state_history: List[dict] = []  # P1: 每轮池子状态快照，用于回退
 
     print(f"开始训练: {num_iterations} 轮, 每轮 {episodes_per_iter} episode")
     print(f"设备: {device}, 股票数: {stock_data.n_stocks}, 交易日: {stock_data.n_days}")
@@ -473,6 +519,35 @@ def train(
             "elapsed_sec": float(elapsed),
         }
         history.append(row)
+
+        # P1改进：验证IC连续3轮下降则回退到下降前的池子状态
+        if val_metrics is not None and np.isfinite(val_metrics["ic"]):
+            val_ic_history.append(float(val_metrics["ic"]))
+            # 同时保存当前池子状态快照
+            pool_state_history.append(combination.save_state())
+            # 只保留最近10轮的状态，避免内存无限增长
+            if len(pool_state_history) > 10:
+                pool_state_history.pop(0)
+                val_ic_history.pop(0)
+
+            if len(val_ic_history) >= 4:
+                # 检查最近3轮是否连续下降
+                recent_4 = val_ic_history[-4:]
+                if recent_4[0] > recent_4[1] > recent_4[2] > recent_4[3]:
+                    # 回退到下降开始前的池子状态（recent_4[0]对应的状态）
+                    rollback_state = pool_state_history[-4]
+                    print(
+                        f"  [!] 验证IC连续3轮下降: {recent_4[0]:.4f} -> "
+                        f"{recent_4[1]:.4f} -> {recent_4[2]:.4f} -> {recent_4[3]:.4f}"
+                    )
+                    print(
+                        f"  [!] 回退到下降前状态 (pool_size={len(rollback_state['alpha_exprs'])}),"
+                        f" 丢弃下降期间加入的因子"
+                    )
+                    combination.restore_state(rollback_state)
+                    # 清空历史，从回退后的状态重新开始跟踪
+                    val_ic_history.clear()
+                    pool_state_history.clear()
 
         print(
             f"[{iteration+1:3d}/{num_iterations}] "

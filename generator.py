@@ -120,7 +120,7 @@ class PPOAgent:
         net: AlphaGenNet,
         lr: float = 3e-4,
         clip_eps: float = 0.2,
-        entropy_coef: float = 0.01,
+        entropy_coef: float = 0.03,
         value_coef: float = 0.5,
         max_grad_norm: float = 0.5,
         ppo_epochs: int = 4,

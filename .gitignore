@@ -4,4 +4,6 @@ __pycache__/
 深度学习基础大作业.pdf
 ai改进方法.md
 alphagen.pdf
-outputs_*/
+output*/
+test*.py
+analyze_outputs.py
