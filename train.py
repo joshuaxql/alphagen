@@ -14,6 +14,7 @@ import time
 from typing import List
 import numpy as np
 import torch
+import argparse
 
 from tokens import (
     VOCAB,
@@ -34,7 +35,7 @@ from expression import (
 from calculator import StockData, calc_rank_ic
 from combination import AlphaCombinationModel
 from masking import RPNBuilder
-from generator import AlphaGenNet, PPOAgent, Episode
+from generator import PPOAgent, Episode
 from data import Data
 from common import ADJUST_PREV
 from reporting import (
@@ -365,6 +366,13 @@ def train(
     gamma: float = 0.99,
     gae_lambda: float = 0.95,
     enable_curriculum: bool = True,
+    model_type: str = "rnn",
+    # Transformer 专用参数
+    tf_embed_dim: int = 64,
+    tf_nhead: int = 4,
+    tf_num_layers: int = 3,
+    tf_dim_feedforward: int = 256,
+    tf_dropout: float = 0.1,
 ):
     """Algorithm 2 完整训练循环。"""
     os.makedirs(save_dir, exist_ok=True)
@@ -372,8 +380,25 @@ def train(
     # 初始化组合模型
     combination = AlphaCombinationModel(stock_data, target, max_pool_size=max_pool_size)
 
-    # 初始化网络
-    net = AlphaGenNet(vocab_size=VOCAB_SIZE)
+    # 根据 model_type 初始化网络
+    if model_type == "transformer":
+        from generator_transformer import AlphaGenTransformer
+        net = AlphaGenTransformer(
+            vocab_size=VOCAB_SIZE,
+            embed_dim=tf_embed_dim,
+            nhead=tf_nhead,
+            num_layers=tf_num_layers,
+            dim_feedforward=tf_dim_feedforward,
+            dropout=tf_dropout,
+            max_seq_len=max_seq_len,
+        )
+        print(f"模型: Transformer (embed_dim={tf_embed_dim}, nhead={tf_nhead}, "
+              f"layers={tf_num_layers}, ff_dim={tf_dim_feedforward}, dropout={tf_dropout})")
+    else:
+        from generator import AlphaGenNet
+        net = AlphaGenNet(vocab_size=VOCAB_SIZE)
+        print(f"模型: LSTM (embed_dim=32, hidden_dim=128, num_layers=2)")
+
     agent = PPOAgent(net, lr=lr, device=device, gamma=gamma, gae_lambda=gae_lambda)
 
     # 课程学习管理器
@@ -651,27 +676,41 @@ def save_checkpoint(combination, net, save_dir, tag="latest"):
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--train_start", default="20190101")
-    parser.add_argument("--train_end", default="20241231")
-    parser.add_argument("--val_start", default="20250101")
-    parser.add_argument("--val_end", default="20251231")
-    parser.add_argument("--iterations", type=int, default=20)
-    parser.add_argument("--episodes", type=int, default=64)
-    parser.add_argument("--pool_size", type=int, default=15)
-    parser.add_argument("--horizon", type=int, default=3)
-    parser.add_argument("--n_hold", type=int, default=20)
-    parser.add_argument("--n_swap", type=int, default=3)
-    parser.add_argument("--commission", type=float, default=0.001)
-    parser.add_argument("--benchmark_code", default="000300.SH")
-    parser.add_argument("--save_dir", default="outputs")
+    parser = argparse.ArgumentParser(description="Alpha 因子生成训练管线")
+    # ── 数据参数 ──
+    parser.add_argument("--train_start", default="20190101", help="训练集起始日期 (YYYYMMDD)")
+    parser.add_argument("--train_end", default="20241231", help="训练集结束日期 (YYYYMMDD)")
+    parser.add_argument("--val_start", default="20250101", help="验证集起始日期 (YYYYMMDD)")
+    parser.add_argument("--val_end", default="20251231", help="验证集结束日期 (YYYYMMDD)")
+    # ── 训练参数 ──
+    parser.add_argument("--iterations", type=int, default=20, help="训练轮数")
+    parser.add_argument("--episodes", type=int, default=64, help="每轮 episode 数")
+    parser.add_argument("--pool_size", type=int, default=15, help="Alpha 池最大容量")
+    parser.add_argument("--horizon", type=int, default=3, help="目标收益前瞻天数")
+    parser.add_argument("--lr", type=float, default=3e-4, help="学习率")
+    # ── 回测参数 ──
+    parser.add_argument("--n_hold", type=int, default=20, help="持仓股票数")
+    parser.add_argument("--n_swap", type=int, default=3, help="每期换仓数")
+    parser.add_argument("--commission", type=float, default=0.001, help="交易佣金率")
+    parser.add_argument("--benchmark_code", default="000300.SH", help="基准指数代码")
+    # ── 输出与设备 ──
+    parser.add_argument("--save_dir", default="outputs", help="输出目录")
     parser.add_argument("--gamma", type=float, default=0.99, help="GAE discount factor")
     parser.add_argument("--gae_lambda", type=float, default=0.95, help="GAE lambda")
-    parser.add_argument("--enable_curriculum", action="store_true", default=True, help="Enable curriculum learning")
-    parser.add_argument("--no_curriculum", action="store_false", dest="enable_curriculum", help="Disable curriculum learning")
+    parser.add_argument("--enable_curriculum", action="store_true", default=True, help="启用课程学习")
+    parser.add_argument("--no_curriculum", action="store_false", dest="enable_curriculum", help="禁用课程学习")
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu", help="训练设备 (cpu/cuda)")
+    # ── 模型选择 ──
     parser.add_argument(
-        "--device", default="cuda" if torch.cuda.is_available() else "cpu"
+        "--model", choices=["rnn", "transformer"], default="rnn",
+        help="策略网络类型: rnn (LSTM, 默认) 或 transformer"
     )
+    # ── Transformer 专用参数 ──
+    parser.add_argument("--tf_embed_dim", type=int, default=64, help="[Transformer] embedding 维度")
+    parser.add_argument("--tf_nhead", type=int, default=4, help="[Transformer] 注意力头数")
+    parser.add_argument("--tf_num_layers", type=int, default=3, help="[Transformer] Encoder 层数")
+    parser.add_argument("--tf_dim_feedforward", type=int, default=256, help="[Transformer] 前馈网络维度")
+    parser.add_argument("--tf_dropout", type=float, default=0.1, help="[Transformer] Dropout 概率")
     args = parser.parse_args()
 
     print("加载训练集数据...")
@@ -712,11 +751,18 @@ def main():
         episodes_per_iter=args.episodes,
         max_pool_size=args.pool_size,
         horizon=args.horizon,
+        lr=args.lr,
         device=args.device,
         save_dir=args.save_dir,
         gamma=args.gamma,
         gae_lambda=args.gae_lambda,
         enable_curriculum=args.enable_curriculum,
+        model_type=args.model,
+        tf_embed_dim=args.tf_embed_dim,
+        tf_nhead=args.tf_nhead,
+        tf_num_layers=args.tf_num_layers,
+        tf_dim_feedforward=args.tf_dim_feedforward,
+        tf_dropout=args.tf_dropout,
     )
 
     pool_file = os.path.join(args.save_dir, "pool_best.json")

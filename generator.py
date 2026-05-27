@@ -202,7 +202,7 @@ class PPOAgent:
         # ── 为批量 LSTM 做 padding ──
         max_seq = max(len(s) for s in all_input_ids)
         padded = torch.zeros(n_total, max_seq, dtype=torch.long, device=self.device)
-        lengths = torch.zeros(n_total, dtype=torch.long)
+        lengths = torch.zeros(n_total, dtype=torch.long, device=self.device)
         for i, seq in enumerate(all_input_ids):
             padded[i, : len(seq)] = torch.tensor(seq, dtype=torch.long)
             lengths[i] = len(seq)
