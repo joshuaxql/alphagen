@@ -367,6 +367,7 @@ def train(
     gae_lambda: float = 0.95,
     enable_curriculum: bool = True,
     model_type: str = "rnn",
+    resume_from: str | None = None,
     # Transformer 专用参数
     tf_embed_dim: int = 64,
     tf_nhead: int = 4,
@@ -420,12 +421,25 @@ def train(
             max_seq_len=max_seq_len,
             time_deltas=TIME_DELTAS,
         )
+
+    # 断点续训：如果指定了 resume_from，加载checkpoint恢复状态
+    start_iteration = 0
     best_score = -np.inf
     history = []
     val_ic_history: List[float] = []  # P1: 跟踪验证IC历史
     pool_state_history: List[dict] = []  # P1: 每轮池子状态快照，用于回退
 
-    print(f"开始训练: {num_iterations} 轮, 每轮 {episodes_per_iter} episode")
+    if resume_from is not None:
+        ckpt_path = (
+            os.path.join(resume_from, "checkpoint_latest.pt")
+            if os.path.isdir(resume_from)
+            else resume_from
+        )
+        start_iteration, best_score, history, val_ic_history = load_checkpoint(
+            ckpt_path, combination, net, agent, device=device
+        )
+
+    print(f"开始训练: 总{num_iterations}轮, 从第{start_iteration + 1}轮继续, 每轮{episodes_per_iter}个episode")
     print(f"设备: {device}, 股票数: {stock_data.n_stocks}, 交易日: {stock_data.n_days}")
     print("股票过滤: 默认排除北交所(BJ)和ST股票")
     if curriculum is not None:
@@ -448,7 +462,7 @@ def train(
         )
     print("=" * 70)
 
-    for iteration in range(num_iterations):
+    for iteration in range(start_iteration, num_iterations):
         t0 = time.time()
         episodes = []
         rewards = []
@@ -603,14 +617,33 @@ def train(
         # 保存最佳
         if selection_score > best_score and combination.pool_size > 0:
             best_score = selection_score
-            save_checkpoint(combination, net, save_dir, tag="best")
+            save_checkpoint(
+                combination, net, agent, save_dir,
+                iteration, best_score, history, val_ic_history,
+                tag="best",
+            )
 
-        # 每 20 轮保存
+        # 每轮保存最新checkpoint（用于断点续训）
+        save_checkpoint(
+            combination, net, agent, save_dir,
+            iteration, best_score, history, val_ic_history,
+            tag="latest",
+        )
+
+        # 每 20 轮额外保存一个带iter标签的checkpoint
         if (iteration + 1) % 20 == 0:
-            save_checkpoint(combination, net, save_dir, tag=f"iter{iteration+1}")
+            save_checkpoint(
+                combination, net, agent, save_dir,
+                iteration, best_score, history, val_ic_history,
+                tag=f"iter{iteration+1}",
+            )
 
     # 最终保存
-    save_checkpoint(combination, net, save_dir, tag="final")
+    save_checkpoint(
+        combination, net, agent, save_dir,
+        num_iterations - 1, best_score, history, val_ic_history,
+        tag="final",
+    )
     save_training_history(history, save_dir)
     plot_training_history(history, os.path.join(save_dir, "training_metrics.png"))
 
@@ -652,11 +685,32 @@ def train(
     return combination, net, history
 
 
-def save_checkpoint(combination, net, save_dir, tag="latest"):
-    # 保存网络
-    torch.save(net.state_dict(), os.path.join(save_dir, f"net_{tag}.pt"))
+def save_checkpoint(
+    combination,
+    net,
+    agent,
+    save_dir,
+    iteration,
+    best_score,
+    history,
+    val_ic_history,
+    tag="latest",
+):
+    """保存完整训练状态，用于断点续训"""
+    checkpoint = {
+        "iteration": iteration,
+        "net_state": net.state_dict(),
+        "optimizer_state": agent.optimizer.state_dict(),
+        "pool_state": combination.save_state(),
+        "best_score": float(best_score) if np.isfinite(best_score) else -float("inf"),
+        "history": history,
+        "val_ic_history": val_ic_history,
+    }
+    ckpt_path = os.path.join(save_dir, f"checkpoint_{tag}.pt")
+    torch.save(checkpoint, ckpt_path)
 
-    # 保存 alpha 池信息
+    # 同时保存网络权重和池子（便于单独查看）
+    torch.save(net.state_dict(), os.path.join(save_dir, f"net_{tag}.pt"))
     pool_info = []
     for i, expr in enumerate(combination.alpha_exprs):
         pool_info.append(
@@ -668,6 +722,41 @@ def save_checkpoint(combination, net, save_dir, tag="latest"):
         )
     with open(os.path.join(save_dir, f"pool_{tag}.json"), "w", encoding="utf-8") as f:
         json.dump(pool_info, f, ensure_ascii=False, indent=2)
+
+    print(f"  [Checkpoint] 已保存到 {ckpt_path} (iter={iteration}, pool={combination.pool_size})")
+
+
+def load_checkpoint(checkpoint_path, combination, net, agent, device="cpu"):
+    """从checkpoint恢复训练状态
+    
+    返回: (start_iteration, best_score, history, val_ic_history)
+    """
+    if not os.path.isfile(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    print(f"[Resume] 加载 checkpoint: {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+
+    # 恢复网络
+    net.load_state_dict(checkpoint["net_state"])
+    net.to(device)
+
+    # 恢复优化器
+    agent.optimizer.load_state_dict(checkpoint["optimizer_state"])
+
+    # 恢复池子状态
+    combination.restore_state(checkpoint["pool_state"])
+
+    # 恢复训练进度
+    start_iteration = checkpoint["iteration"]
+    best_score = checkpoint["best_score"]
+    history = checkpoint.get("history", [])
+    val_ic_history = checkpoint.get("val_ic_history", [])
+
+    print(f"[Resume] 将从第 {start_iteration + 1} 轮继续训练")
+    print(f"[Resume] 当前 best_score={best_score:.4f}, pool_size={combination.pool_size}")
+
+    return start_iteration, best_score, history, val_ic_history
 
 
 # ============================================================
@@ -695,6 +784,11 @@ def main():
     parser.add_argument("--benchmark_code", default="000300.SH", help="基准指数代码")
     # ── 输出与设备 ──
     parser.add_argument("--save_dir", default="outputs", help="输出目录")
+    parser.add_argument(
+        "--resume",
+        default=None,
+        help="断点续训：checkpoint文件路径或包含checkpoint_latest.pt的目录",
+    )
     parser.add_argument("--gamma", type=float, default=0.99, help="GAE discount factor")
     parser.add_argument("--gae_lambda", type=float, default=0.95, help="GAE lambda")
     parser.add_argument("--enable_curriculum", action="store_true", default=True, help="启用课程学习")
@@ -758,6 +852,7 @@ def main():
         gae_lambda=args.gae_lambda,
         enable_curriculum=args.enable_curriculum,
         model_type=args.model,
+        resume_from=args.resume,
         tf_embed_dim=args.tf_embed_dim,
         tf_nhead=args.tf_nhead,
         tf_num_layers=args.tf_num_layers,
