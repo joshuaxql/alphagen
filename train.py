@@ -470,7 +470,9 @@ def train(
                     curriculum = CurriculumManager.from_state(curriculum_state)
             restore_rng_state(resume_state.get("rng_state"))
 
-            metadata = resume_state.get("metadata") or load_checkpoint_metadata(save_dir)
+            metadata = resume_state.get("metadata") or load_checkpoint_metadata(
+                save_dir
+            )
             start_iteration = int(metadata.get("iteration", 0) or 0)
             loaded_best_score = metadata.get("best_score")
             if loaded_best_score is not None and np.isfinite(loaded_best_score):
@@ -932,19 +934,19 @@ def main():
     parser = argparse.ArgumentParser(description="Alpha 因子生成训练管线")
     # ── 数据参数 ──
     parser.add_argument(
-        "--train_start", default="20190101", help="训练集起始日期 (YYYYMMDD)"
+        "--train_start", default="20240101", help="训练集起始日期 (YYYYMMDD)"
     )
     parser.add_argument(
-        "--train_end", default="20241231", help="训练集结束日期 (YYYYMMDD)"
+        "--train_end", default="20251231", help="训练集结束日期 (YYYYMMDD)"
     )
     parser.add_argument(
-        "--val_start", default="20250101", help="验证集起始日期 (YYYYMMDD)"
+        "--val_start", default="20260101", help="验证集起始日期 (YYYYMMDD)"
     )
     parser.add_argument(
-        "--val_end", default="20251231", help="验证集结束日期 (YYYYMMDD)"
+        "--val_end", default="20260501", help="验证集结束日期 (YYYYMMDD)"
     )
     # ── 训练参数 ──
-    parser.add_argument("--iterations", type=int, default=20, help="训练轮数")
+    parser.add_argument("--iterations", type=int, default=40, help="训练轮数")
     parser.add_argument("--episodes", type=int, default=64, help="每轮 episode 数")
     parser.add_argument("--pool_size", type=int, default=15, help="Alpha 池最大容量")
     parser.add_argument("--horizon", type=int, default=3, help="目标收益前瞻天数")

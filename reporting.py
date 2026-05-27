@@ -497,15 +497,20 @@ def plot_training_history(history: List[Dict[str, object]], output_path: str) ->
     if not history:
         return
 
+    start_idx = 0
+    while start_idx < len(history) and history[start_idx].get("pool_size", 0) == 0:
+        start_idx += 1
+    plot_history = history[start_idx:] if start_idx < len(history) else history
+
     plt, _ = _import_pyplot()
 
-    iterations = [row["iteration"] for row in history]
-    train_loss = [row["train_loss"] for row in history]
-    train_ic = [row["train_ic"] for row in history]
-    train_icir = [row["train_icir"] for row in history]
-    val_loss = [row.get("val_loss") for row in history]
-    val_ic = [row.get("val_ic") for row in history]
-    val_icir = [row.get("val_icir") for row in history]
+    iterations = [row["iteration"] for row in plot_history]
+    train_loss = [row["train_loss"] for row in plot_history]
+    train_ic = [row["train_ic"] for row in plot_history]
+    train_icir = [row["train_icir"] for row in plot_history]
+    val_loss = [row.get("val_loss") for row in plot_history]
+    val_ic = [row.get("val_ic") for row in plot_history]
+    val_icir = [row.get("val_icir") for row in plot_history]
 
     fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
     colors = {"train": "#0B6E4F", "val": "#C84C09"}
