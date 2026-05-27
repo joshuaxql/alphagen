@@ -367,10 +367,9 @@ class AlphaCombinationModel:
         if self.pool_size > self.max_pool_size:
             self._remove_weakest()
 
-        # 6. 检查是否真正提升了组合IC（增量必须严格大于1e-6），否则回滚
+        # 6. 检查是否真正提升了组合IC，否则回滚
         new_ic = self.get_combination_ic()
-        ic_delta = new_ic - old_ic
-        if (not np.isfinite(new_ic)) or (ic_delta <= 1e-6 and k > 0):
+        if (not np.isfinite(new_ic)) or (new_ic < old_ic - 1e-6 and k > 0):
             # 完整回滚所有状态
             self.alpha_exprs = old_exprs
             self.alpha_values = old_values
@@ -479,43 +478,6 @@ class AlphaCombinationModel:
                 for j in range(k):
                     row += f" {self.ic_matrix[i,j]:+.3f}"
                 print(row)
-
-    def reset_pool(self):
-        """清空alpha池，重置所有状态"""
-        self.alpha_exprs: List[ExprNode] = []
-        self.alpha_values: List[np.ndarray] = []
-        self.weights: np.ndarray = np.array([], dtype=np.float64)
-        self.ic_vector: np.ndarray = np.array([], dtype=np.float64)
-        self.ic_matrix: np.ndarray = np.array([]).reshape(0, 0)
-        self.last_add_status = ""
-        self.last_add_accepted = False
-        self.last_add_candidate_ic = 0.0
-        self.last_add_ic_delta = 0.0
-        self.last_add_icir_delta = 0.0
-
-    def save_state(self) -> dict:
-        """保存当前池子状态，用于回退恢复"""
-        return {
-            "alpha_exprs": list(self.alpha_exprs),
-            "alpha_values": [v.copy() for v in self.alpha_values],
-            "weights": self.weights.copy(),
-            "ic_vector": self.ic_vector.copy(),
-            "ic_matrix": self.ic_matrix.copy(),
-        }
-
-    def restore_state(self, state: dict) -> None:
-        """恢复到之前保存的池子状态"""
-        self.alpha_exprs = list(state["alpha_exprs"])
-        self.alpha_values = [v.copy() for v in state["alpha_values"]]
-        self.weights = state["weights"].copy()
-        self.ic_vector = state["ic_vector"].copy()
-        self.ic_matrix = state["ic_matrix"].copy()
-        # 重置last_add状态，因为恢复后没有"刚加入"的因子
-        self.last_add_status = ""
-        self.last_add_accepted = False
-        self.last_add_candidate_ic = 0.0
-        self.last_add_ic_delta = 0.0
-        self.last_add_icir_delta = 0.0
 
 
 # ============================================================

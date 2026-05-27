@@ -120,7 +120,7 @@ class PPOAgent:
         net: AlphaGenNet,
         lr: float = 3e-4,
         clip_eps: float = 0.2,
-        entropy_coef: float = 0.03,
+        entropy_coef: float = 0.01,
         value_coef: float = 0.5,
         max_grad_norm: float = 0.5,
         ppo_epochs: int = 4,
@@ -245,11 +245,17 @@ class PPOAgent:
             all_returns_np[start:end] = returns_ep
 
         # ── 转换为 tensor ──
-        advantages_t = torch.tensor(all_advantages, dtype=torch.float32, device=self.device)
-        returns_t = torch.tensor(all_returns_np, dtype=torch.float32, device=self.device)
+        advantages_t = torch.tensor(
+            all_advantages, dtype=torch.float32, device=self.device
+        )
+        returns_t = torch.tensor(
+            all_returns_np, dtype=torch.float32, device=self.device
+        )
         actions_t = torch.tensor(all_actions, dtype=torch.long, device=self.device)
         old_lp = torch.tensor(all_old_logprobs, dtype=torch.float32, device=self.device)
-        masks_t = torch.tensor(np.stack(all_masks_np), dtype=torch.bool, device=self.device)
+        masks_t = torch.tensor(
+            np.stack(all_masks_np), dtype=torch.bool, device=self.device
+        )
 
         stats = {"policy_loss": 0, "value_loss": 0, "entropy": 0}
         n_updates = 0

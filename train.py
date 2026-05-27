@@ -11,7 +11,6 @@
 import os
 import json
 import time
-from typing import List
 import numpy as np
 import torch
 import argparse
@@ -220,18 +219,6 @@ def evaluate_episode(
 
     formula = tree_to_formula(tree)
 
-    # 原始特征去重：同类型原始特征在池中最多只能有1个
-    raw_features = ["$close", "$open", "$high", "$low", "$vol", "$vwap"]
-    if formula.strip() in raw_features:
-        for existing_expr in combination.alpha_exprs:
-            if tree_to_formula(existing_expr).strip() == formula.strip():
-                return _result(
-                    -0.25,
-                    accepted=False,
-                    formula=formula,
-                    status="rejected_duplicate_raw",
-                )
-
     try:
         alpha_val = combination.calculator.evaluate(tree)
     except Exception:
@@ -254,16 +241,10 @@ def evaluate_episode(
 
     if combination.last_add_accepted:
         ic_delta = new_ic - old_ic
-        # ic_delta 硬门槛已在 combination.add_alpha() 内部处理
-        # 此处 ic_delta 一定严格大于 1e-6
-
         icir_delta = combination.last_add_icir_delta
 
         # 计算候选 alpha 的 Rank IC（Spearman 相关系数）
         candidate_rank_ic = calc_rank_ic(alpha_val, combination.target)
-
-        # 基础方向奖励：鼓励正IC方向
-        direction_bonus = np.sign(combination.last_add_candidate_ic) * 0.5
 
         # 正负平衡奖励：如果新因子IC方向与多数池内因子相反，给奖励
         pos_count = sum(1 for ic in combination.ic_vector if ic > 0)
@@ -271,9 +252,9 @@ def evaluate_episode(
         balance_bonus = 0.0
         candidate_ic_sign = combination.last_add_candidate_ic
         if candidate_ic_sign > 0 and pos_count < neg_count:
-            balance_bonus = 1.0
+            balance_bonus = 0.05
         elif candidate_ic_sign < 0 and neg_count < pos_count:
-            balance_bonus = 1.0
+            balance_bonus = 0.05
 
         # 冗余惩罚：与已有因子相关性越高，惩罚越大
         redundancy_penalty = 0.0
@@ -288,22 +269,13 @@ def evaluate_episode(
             if max_mutual > 0.7:
                 redundancy_penalty = (max_mutual - 0.7) * 0.5
 
-        # 复杂度惩罚：严厉惩罚原始特征，轻微惩罚公式长度
-        raw_features = ["$close", "$open", "$high", "$low", "$vol", "$vwap"]
-        if formula.strip() in raw_features:
-            complexity_penalty = 5.0  # 严厉惩罚原始特征
-        else:
-            complexity_penalty = len(formula) / 200.0  # 轻微惩罚长度
-
         # 多目标奖励
         reward = (
-            50.0 * ic_delta  # IC增量（主目标，压倒性权重）
+            10.0 * ic_delta  # IC增量（主目标）
             + 3.0 * icir_delta  # ICIR增量（稳定性）
             + 2.0 * candidate_rank_ic  # Rank IC（鲁棒性）
-            + direction_bonus  # 基础方向奖励（鼓励正IC）
-            + balance_bonus  # 正负平衡（大幅增强）
+            + balance_bonus  # 正负平衡
             - redundancy_penalty  # 冗余惩罚
-            - complexity_penalty  # 复杂度惩罚
         )
 
         return _result(
@@ -351,7 +323,6 @@ def train(
     gae_lambda: float = 0.95,
     enable_curriculum: bool = True,
     model_type: str = "rnn",
-    resume_from: str | None = None,
     # Transformer 专用参数
     tf_embed_dim: int = 64,
     tf_nhead: int = 4,
@@ -411,26 +382,10 @@ def train(
             max_seq_len=max_seq_len,
             time_deltas=TIME_DELTAS,
         )
-
-    # 断点续训：如果指定了 resume_from，加载checkpoint恢复状态
-    start_iteration = 0
     best_score = -np.inf
     history = []
-    val_ic_history: List[float] = []  # 跟踪验证IC历史
 
-    if resume_from is not None:
-        ckpt_path = (
-            os.path.join(resume_from, "checkpoint_latest.pt")
-            if os.path.isdir(resume_from)
-            else resume_from
-        )
-        start_iteration, best_score, history, val_ic_history = load_checkpoint(
-            ckpt_path, combination, net, agent, device=device
-        )
-
-    print(
-        f"开始训练: 总{num_iterations}轮, 从第{start_iteration + 1}轮继续, 每轮{episodes_per_iter}个episode"
-    )
+    print(f"开始训练: {num_iterations} 轮, 每轮 {episodes_per_iter} episode")
     print(f"设备: {device}, 股票数: {stock_data.n_stocks}, 交易日: {stock_data.n_days}")
     print("股票过滤: 默认排除北交所(BJ)和ST股票")
     if curriculum is not None:
@@ -455,7 +410,7 @@ def train(
         )
     print("=" * 70)
 
-    for iteration in range(start_iteration, num_iterations):
+    for iteration in range(num_iterations):
         t0 = time.time()
         episodes = []
         rewards = []
@@ -554,10 +509,6 @@ def train(
         }
         history.append(row)
 
-        # 记录验证IC历史
-        if val_metrics is not None and np.isfinite(val_metrics["ic"]):
-            val_ic_history.append(float(val_metrics["ic"]))
-
         print(
             f"[{iteration+1:3d}/{num_iterations}] "
             f"train_loss={train_metrics['loss']:.4f}  "
@@ -587,57 +538,14 @@ def train(
         # 保存最佳
         if selection_score > best_score and combination.pool_size > 0:
             best_score = selection_score
-            save_checkpoint(
-                combination,
-                net,
-                agent,
-                save_dir,
-                iteration,
-                best_score,
-                history,
-                val_ic_history,
-                tag="best",
-            )
+            save_checkpoint(combination, net, save_dir, tag="best")
 
-        # 每轮保存最新checkpoint（用于断点续训）
-        save_checkpoint(
-            combination,
-            net,
-            agent,
-            save_dir,
-            iteration,
-            best_score,
-            history,
-            val_ic_history,
-            tag="latest",
-        )
-
-        # 每 20 轮额外保存一个带iter标签的checkpoint
+        # 每 20 轮保存
         if (iteration + 1) % 20 == 0:
-            save_checkpoint(
-                combination,
-                net,
-                agent,
-                save_dir,
-                iteration,
-                best_score,
-                history,
-                val_ic_history,
-                tag=f"iter{iteration+1}",
-            )
+            save_checkpoint(combination, net, save_dir, tag=f"iter{iteration+1}")
 
     # 最终保存
-    save_checkpoint(
-        combination,
-        net,
-        agent,
-        save_dir,
-        num_iterations - 1,
-        best_score,
-        history,
-        val_ic_history,
-        tag="final",
-    )
+    save_checkpoint(combination, net, save_dir, tag="final")
     save_training_history(history, save_dir)
     plot_training_history(history, os.path.join(save_dir, "training_metrics.png"))
 
@@ -679,32 +587,11 @@ def train(
     return combination, net, history
 
 
-def save_checkpoint(
-    combination,
-    net,
-    agent,
-    save_dir,
-    iteration,
-    best_score,
-    history,
-    val_ic_history,
-    tag="latest",
-):
-    """保存完整训练状态，用于断点续训"""
-    checkpoint = {
-        "iteration": iteration,
-        "net_state": net.state_dict(),
-        "optimizer_state": agent.optimizer.state_dict(),
-        "pool_state": combination.save_state(),
-        "best_score": float(best_score) if np.isfinite(best_score) else -float("inf"),
-        "history": history,
-        "val_ic_history": val_ic_history,
-    }
-    ckpt_path = os.path.join(save_dir, f"checkpoint_{tag}.pt")
-    torch.save(checkpoint, ckpt_path)
-
-    # 同时保存网络权重和池子（便于单独查看）
+def save_checkpoint(combination, net, save_dir, tag="latest"):
+    # 保存网络
     torch.save(net.state_dict(), os.path.join(save_dir, f"net_{tag}.pt"))
+
+    # 保存 alpha 池信息
     pool_info = []
     for i, expr in enumerate(combination.alpha_exprs):
         pool_info.append(
@@ -716,45 +603,6 @@ def save_checkpoint(
         )
     with open(os.path.join(save_dir, f"pool_{tag}.json"), "w", encoding="utf-8") as f:
         json.dump(pool_info, f, ensure_ascii=False, indent=2)
-
-    print(
-        f"  [Checkpoint] 已保存到 {ckpt_path} (iter={iteration}, pool={combination.pool_size})"
-    )
-
-
-def load_checkpoint(checkpoint_path, combination, net, agent, device="cpu"):
-    """从checkpoint恢复训练状态
-
-    返回: (start_iteration, best_score, history, val_ic_history)
-    """
-    if not os.path.isfile(checkpoint_path):
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-
-    print(f"[Resume] 加载 checkpoint: {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-
-    # 恢复网络
-    net.load_state_dict(checkpoint["net_state"])
-    net.to(device)
-
-    # 恢复优化器
-    agent.optimizer.load_state_dict(checkpoint["optimizer_state"])
-
-    # 恢复池子状态
-    combination.restore_state(checkpoint["pool_state"])
-
-    # 恢复训练进度
-    start_iteration = checkpoint["iteration"]
-    best_score = checkpoint["best_score"]
-    history = checkpoint.get("history", [])
-    val_ic_history = checkpoint.get("val_ic_history", [])
-
-    print(f"[Resume] 将从第 {start_iteration + 1} 轮继续训练")
-    print(
-        f"[Resume] 当前 best_score={best_score:.4f}, pool_size={combination.pool_size}"
-    )
-
-    return start_iteration, best_score, history, val_ic_history
 
 
 # ============================================================
@@ -778,7 +626,7 @@ def main():
         "--val_end", default="20251231", help="验证集结束日期 (YYYYMMDD)"
     )
     # ── 训练参数 ──
-    parser.add_argument("--iterations", type=int, default=50, help="训练轮数")
+    parser.add_argument("--iterations", type=int, default=20, help="训练轮数")
     parser.add_argument("--episodes", type=int, default=64, help="每轮 episode 数")
     parser.add_argument("--pool_size", type=int, default=15, help="Alpha 池最大容量")
     parser.add_argument("--horizon", type=int, default=3, help="目标收益前瞻天数")
@@ -790,11 +638,6 @@ def main():
     parser.add_argument("--benchmark_code", default="000300.SH", help="基准指数代码")
     # ── 输出与设备 ──
     parser.add_argument("--save_dir", default="outputs", help="输出目录")
-    parser.add_argument(
-        "--resume",
-        default=None,
-        help="断点续训：checkpoint文件路径或包含checkpoint_latest.pt的目录",
-    )
     parser.add_argument("--gamma", type=float, default=0.99, help="GAE discount factor")
     parser.add_argument("--gae_lambda", type=float, default=0.95, help="GAE lambda")
     parser.add_argument(
@@ -881,7 +724,6 @@ def main():
         gae_lambda=args.gae_lambda,
         enable_curriculum=args.enable_curriculum,
         model_type=args.model,
-        resume_from=args.resume,
         tf_embed_dim=args.tf_embed_dim,
         tf_nhead=args.tf_nhead,
         tf_num_layers=args.tf_num_layers,
