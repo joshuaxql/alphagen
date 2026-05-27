@@ -946,7 +946,7 @@ def main():
         "--val_end", default="20260501", help="验证集结束日期 (YYYYMMDD)"
     )
     # ── 训练参数 ──
-    parser.add_argument("--iterations", type=int, default=40, help="训练轮数")
+    parser.add_argument("--iterations", type=int, default=50, help="训练轮数")
     parser.add_argument("--episodes", type=int, default=64, help="每轮 episode 数")
     parser.add_argument("--pool_size", type=int, default=15, help="Alpha 池最大容量")
     parser.add_argument("--horizon", type=int, default=3, help="目标收益前瞻天数")
