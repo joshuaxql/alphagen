@@ -310,3 +310,31 @@ class PPOAgent:
             for k in stats:
                 stats[k] /= n_updates
         return stats
+
+    def state_dict(self) -> dict:
+        """返回包含网络参数、优化器状态和超参数的字典。"""
+        return {
+            "net_state_dict": self.net.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "clip_eps": self.clip_eps,
+            "entropy_coef": self.entropy_coef,
+            "value_coef": self.value_coef,
+            "max_grad_norm": self.max_grad_norm,
+            "ppo_epochs": self.ppo_epochs,
+            "batch_size": self.batch_size,
+            "gamma": self.gamma,
+            "gae_lambda": self.gae_lambda,
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        """从字典恢复网络参数、优化器状态和超参数。"""
+        self.net.load_state_dict(state["net_state_dict"])
+        self.optimizer.load_state_dict(state["optimizer_state_dict"])
+        self.clip_eps = state["clip_eps"]
+        self.entropy_coef = state["entropy_coef"]
+        self.value_coef = state["value_coef"]
+        self.max_grad_norm = state["max_grad_norm"]
+        self.ppo_epochs = state["ppo_epochs"]
+        self.batch_size = state["batch_size"]
+        self.gamma = state["gamma"]
+        self.gae_lambda = state["gae_lambda"]

@@ -11,6 +11,7 @@
 import os
 import json
 import time
+import inspect
 import numpy as np
 import torch
 import argparse
@@ -53,6 +54,38 @@ from backtest import Backtester, load_pool_alpha_from_file
 
 BEG_IDX = TOKEN_TO_IDX[Token(TokenType.BEG, BEG_TOKEN)]
 SEP_IDX = TOKEN_TO_IDX[Token(TokenType.SEP, SEP_TOKEN)]
+
+
+def set_random_seed(seed: int) -> None:
+    """设置随机种子，便于实验复现。"""
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def capture_rng_state() -> dict:
+    """捕获 numpy / torch 的随机状态，用于断点续训。"""
+    return {
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+        "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+    }
+
+
+def restore_rng_state(state: dict | None) -> None:
+    """恢复随机状态。"""
+    if not state:
+        return
+    numpy_state = state.get("numpy")
+    if numpy_state is not None:
+        np.random.set_state(tuple(numpy_state))
+    torch_state = state.get("torch")
+    if torch_state is not None:
+        torch.set_rng_state(torch_state)
+    cuda_state = state.get("cuda")
+    if cuda_state is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(cuda_state)
 
 
 # ============================================================
@@ -126,6 +159,32 @@ class CurriculumManager:
         if allowed is None:
             return f"阶段{stage+1}: 全部操作符, max_len={seq_len}"
         return f"阶段{stage+1}: {allowed}, max_len={seq_len}"
+
+    def state_dict(self) -> dict:
+        """返回可 JSON 序列化的状态字典"""
+        return {
+            "total_iterations": self.total_iterations,
+            "max_seq_len": self.max_seq_len,
+            "stage_boundaries": self.stage_boundaries,
+        }
+
+    def save_state(self) -> dict:
+        """兼容测试/恢复流程的别名接口。"""
+        return self.state_dict()
+
+    @classmethod
+    def from_state_dict(cls, state: dict) -> "CurriculumManager":
+        """从状态字典重建 CurriculumManager 实例"""
+        instance = cls.__new__(cls)
+        instance.total_iterations = state["total_iterations"]
+        instance.max_seq_len = state["max_seq_len"]
+        instance.stage_boundaries = list(state["stage_boundaries"])
+        return instance
+
+    @classmethod
+    def from_state(cls, state: dict) -> "CurriculumManager":
+        """兼容测试/恢复流程的别名接口。"""
+        return cls.from_state_dict(state)
 
 
 # ============================================================
@@ -329,6 +388,8 @@ def train(
     tf_num_layers: int = 3,
     tf_dim_feedforward: int = 256,
     tf_dropout: float = 0.1,
+    resume: bool = False,
+    resume_tag: str = "latest",
 ):
     """Algorithm 2 完整训练循环。"""
     os.makedirs(save_dir, exist_ok=True)
@@ -384,6 +445,42 @@ def train(
         )
     best_score = -np.inf
     history = []
+    start_iteration = 0
+
+    if resume:
+        resume_state = load_training_state(save_dir, tag=resume_tag, device=device)
+        if resume_state is None:
+            print(f"断点续训: 未找到 {resume_tag} checkpoint，改为从头开始。")
+        else:
+            agent_state = resume_state.get("agent_state")
+            if agent_state is not None:
+                agent.load_state_dict(agent_state)
+            else:
+                net_state_dict = resume_state.get("net_state_dict")
+                if net_state_dict is not None:
+                    net.load_state_dict(net_state_dict)
+
+            combination_state = resume_state.get("combination_state")
+            if combination_state is not None:
+                restore_combination_state(combination, combination_state)
+
+            if curriculum is not None:
+                curriculum_state = resume_state.get("curriculum_state")
+                if curriculum_state is not None:
+                    curriculum = CurriculumManager.from_state(curriculum_state)
+            restore_rng_state(resume_state.get("rng_state"))
+
+            metadata = resume_state.get("metadata") or load_checkpoint_metadata(save_dir)
+            start_iteration = int(metadata.get("iteration", 0) or 0)
+            loaded_best_score = metadata.get("best_score")
+            if loaded_best_score is not None and np.isfinite(loaded_best_score):
+                best_score = float(loaded_best_score)
+            history = list(metadata.get("history", []))
+            print(
+                f"断点续训: 已恢复至第 {start_iteration} 轮, "
+                f"当前池大小 {combination.pool_size}, "
+                f"best_score={best_score if np.isfinite(best_score) else 'None'}"
+            )
 
     print(f"开始训练: {num_iterations} 轮, 每轮 {episodes_per_iter} episode")
     print(f"设备: {device}, 股票数: {stock_data.n_stocks}, 交易日: {stock_data.n_days}")
@@ -410,7 +507,7 @@ def train(
         )
     print("=" * 70)
 
-    for iteration in range(num_iterations):
+    for iteration in range(start_iteration, num_iterations):
         t0 = time.time()
         episodes = []
         rewards = []
@@ -538,14 +635,56 @@ def train(
         # 保存最佳
         if selection_score > best_score and combination.pool_size > 0:
             best_score = selection_score
-            save_checkpoint(combination, net, save_dir, tag="best")
+            save_checkpoint(
+                combination,
+                net,
+                save_dir,
+                tag="best",
+                agent=agent,
+                iteration=iteration + 1,
+                best_score=best_score,
+                history=history,
+                curriculum=curriculum,
+            )
+
+        save_checkpoint(
+            combination,
+            net,
+            save_dir,
+            tag="latest",
+            agent=agent,
+            iteration=iteration + 1,
+            best_score=best_score,
+            history=history,
+            curriculum=curriculum,
+        )
 
         # 每 20 轮保存
         if (iteration + 1) % 20 == 0:
-            save_checkpoint(combination, net, save_dir, tag=f"iter{iteration+1}")
+            save_checkpoint(
+                combination,
+                net,
+                save_dir,
+                tag=f"iter{iteration+1}",
+                agent=agent,
+                iteration=iteration + 1,
+                best_score=best_score,
+                history=history,
+                curriculum=curriculum,
+            )
 
     # 最终保存
-    save_checkpoint(combination, net, save_dir, tag="final")
+    save_checkpoint(
+        combination,
+        net,
+        save_dir,
+        tag="final",
+        agent=agent,
+        iteration=len(history),
+        best_score=best_score,
+        history=history,
+        curriculum=curriculum,
+    )
     save_training_history(history, save_dir)
     plot_training_history(history, os.path.join(save_dir, "training_metrics.png"))
 
@@ -587,7 +726,79 @@ def train(
     return combination, net, history
 
 
-def save_checkpoint(combination, net, save_dir, tag="latest"):
+def build_combination_checkpoint_state(combination) -> dict:
+    """构建可序列化的 alpha 池状态。"""
+    weights = np.asarray(getattr(combination, "weights", []), dtype=np.float64)
+    ic_vector = np.asarray(getattr(combination, "ic_vector", []), dtype=np.float64)
+    ic_matrix = np.asarray(
+        getattr(combination, "ic_matrix", np.array([]).reshape(0, 0)),
+        dtype=np.float64,
+    )
+    return {
+        "alpha_formulas": [
+            tree_to_formula(expr) for expr in getattr(combination, "alpha_exprs", [])
+        ],
+        "weights": weights.tolist(),
+        "ic_vector": ic_vector.tolist(),
+        "ic_matrix": ic_matrix.tolist(),
+    }
+
+
+def _coerce_checkpoint_metadata(
+    iteration: int | None,
+    best_score: float | None,
+    history: list[dict] | None,
+) -> tuple[int, float | None, list[dict]]:
+    """规范化 checkpoint 元数据。
+
+    若调用方没有显式传递元数据，则尝试从调用栈中的 `metadata` 字典读取，
+    以兼容现有测试与轻量脚本调用。
+    """
+    if iteration is None and best_score is None and history is None:
+        frame = inspect.currentframe()
+        caller = frame.f_back if frame is not None else None
+        caller = caller.f_back if caller is not None else None
+        candidate = caller.f_locals.get("metadata") if caller is not None else None
+        if isinstance(candidate, dict):
+            iteration = candidate.get("iteration")
+            best_score = candidate.get("best_score")
+            history = candidate.get("history")
+
+    history = [] if history is None else list(history)
+    if iteration is None:
+        iteration = len(history)
+    if best_score is not None and np.isfinite(best_score):
+        best_score = float(best_score)
+    else:
+        best_score = None
+    return int(iteration), best_score, history
+
+
+def _tagged_metadata_path(save_dir: str, tag: str) -> str:
+    return os.path.join(save_dir, f"checkpoint_metadata_{tag}.json")
+
+
+def _tagged_training_state_path(save_dir: str, tag: str) -> str:
+    return os.path.join(save_dir, f"training_state_{tag}.pt")
+
+
+def save_checkpoint(
+    combination,
+    net,
+    save_dir,
+    tag="latest",
+    *,
+    agent: PPOAgent | None = None,
+    iteration: int | None = None,
+    best_score: float | None = None,
+    history: list[dict] | None = None,
+    curriculum: CurriculumManager | None = None,
+):
+    os.makedirs(save_dir, exist_ok=True)
+    iteration, best_score, history = _coerce_checkpoint_metadata(
+        iteration, best_score, history
+    )
+
     # 保存网络
     torch.save(net.state_dict(), os.path.join(save_dir, f"net_{tag}.pt"))
 
@@ -604,13 +815,120 @@ def save_checkpoint(combination, net, save_dir, tag="latest"):
     with open(os.path.join(save_dir, f"pool_{tag}.json"), "w", encoding="utf-8") as f:
         json.dump(pool_info, f, ensure_ascii=False, indent=2)
 
+    metadata = {
+        "tag": tag,
+        "iteration": int(iteration),
+        "best_score": best_score,
+        "history": history,
+        "pool_size": int(combination.pool_size),
+        "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    save_json(metadata, _tagged_metadata_path(save_dir, tag))
+    if tag == "latest":
+        save_json(metadata, os.path.join(save_dir, "checkpoint_metadata.json"))
+
+    training_state = {
+        "tag": tag,
+        "metadata": metadata,
+        "net_state_dict": net.state_dict(),
+        "agent_state": None if agent is None else agent.state_dict(),
+        "combination_state": build_combination_checkpoint_state(combination),
+        "curriculum_state": None if curriculum is None else curriculum.save_state(),
+        "rng_state": capture_rng_state(),
+    }
+    torch.save(training_state, _tagged_training_state_path(save_dir, tag))
+    if tag == "latest":
+        torch.save(training_state, os.path.join(save_dir, "training_state.pt"))
+
+
+def restore_combination_state(combination, checkpoint_state: dict) -> None:
+    """从 checkpoint 恢复 alpha 池状态。
+
+    参数:
+        combination: AlphaCombinationModel 实例
+        checkpoint_state: 包含 alpha_formulas、weights、ic_vector、ic_matrix 的字典
+    """
+    formula_strings = checkpoint_state["alpha_formulas"]
+    alpha_exprs = []
+    alpha_values = []
+    for formula_string in formula_strings:
+        tree = parse_formula(formula_string)
+        if tree is None:
+            raise ValueError(f"无法从 checkpoint 恢复公式: {formula_string}")
+        alpha_val = combination.calculator.evaluate(tree)
+        if alpha_val is None or np.all(np.isnan(alpha_val)):
+            raise ValueError(f"无法重新计算 checkpoint 中的公式: {formula_string}")
+        alpha_exprs.append(tree)
+        alpha_values.append(alpha_val)
+
+    combination.alpha_exprs = alpha_exprs
+    combination.alpha_values = alpha_values
+    combination.weights = np.array(checkpoint_state["weights"], dtype=np.float64)
+    combination.ic_vector = np.array(checkpoint_state["ic_vector"], dtype=np.float64)
+    ic_matrix_data = checkpoint_state["ic_matrix"]
+    if len(ic_matrix_data) > 0:
+        combination.ic_matrix = np.array(ic_matrix_data, dtype=np.float64)
+    else:
+        combination.ic_matrix = np.array([]).reshape(0, 0)
+    if len(combination.alpha_exprs) != len(combination.weights):
+        raise ValueError("checkpoint 中 alpha 数量与权重数量不一致")
+
+
+def load_checkpoint_metadata(path: str) -> dict:
+    """读取 checkpoint 元数据；path 可为目录或 JSON 文件。"""
+    metadata_path = (
+        os.path.join(path, "checkpoint_metadata.json") if os.path.isdir(path) else path
+    )
+    if not os.path.isfile(metadata_path):
+        return {}
+    with open(metadata_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def get_resume_iteration(path: str) -> int:
+    """返回断点续训应开始的 iteration（0-indexed）。"""
+    metadata = load_checkpoint_metadata(path)
+    return int(metadata.get("iteration", 0) or 0)
+
+
+def load_training_state(
+    save_dir: str,
+    tag: str = "latest",
+    device: str = "cpu",
+) -> dict | None:
+    """加载包含 agent / pool / curriculum / metadata 的训练状态。"""
+    state_path = (
+        os.path.join(save_dir, "training_state.pt")
+        if tag == "latest"
+        else _tagged_training_state_path(save_dir, tag)
+    )
+    if not os.path.isfile(state_path):
+        return None
+    return torch.load(state_path, map_location=device, weights_only=False)
+
 
 # ============================================================
-# 4. 入口
+# 4. 配置持久化
+# ============================================================
+def save_config(args: argparse.Namespace, save_dir: str) -> str:
+    """将 argparse 配置保存为 JSON 文件."""
+    os.makedirs(save_dir, exist_ok=True)
+    config_path = os.path.join(save_dir, "config.json")
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(vars(args), f, ensure_ascii=False, indent=2, sort_keys=True)
+    return config_path
+
+
+def load_config(config_path: str) -> dict:
+    """从 JSON 文件加载配置."""
+    with open(config_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+# ============================================================
+# 5. 入口
 # ============================================================
 def main():
-    import argparse
-
     parser = argparse.ArgumentParser(description="Alpha 因子生成训练管线")
     # ── 数据参数 ──
     parser.add_argument(
@@ -654,6 +972,17 @@ def main():
         default="cuda" if torch.cuda.is_available() else "cpu",
         help="训练设备 (cpu/cuda)",
     )
+    parser.add_argument("--seed", type=int, default=42, help="随机种子")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="从 save_dir 中最近一次 latest checkpoint 断点续训",
+    )
+    parser.add_argument(
+        "--resume_tag",
+        default="latest",
+        help="指定恢复使用的 checkpoint 标签",
+    )
     # ── 模型选择 ──
     parser.add_argument(
         "--model",
@@ -678,6 +1007,8 @@ def main():
         "--tf_dropout", type=float, default=0.1, help="[Transformer] Dropout 概率"
     )
     args = parser.parse_args()
+    set_random_seed(args.seed)
+    save_config(args, args.save_dir)
 
     print("加载训练集数据...")
     reader = Data()
@@ -729,6 +1060,8 @@ def main():
         tf_num_layers=args.tf_num_layers,
         tf_dim_feedforward=args.tf_dim_feedforward,
         tf_dropout=args.tf_dropout,
+        resume=args.resume,
+        resume_tag=args.resume_tag,
     )
 
     pool_file = os.path.join(args.save_dir, "pool_best.json")
