@@ -13,6 +13,9 @@ from typing import Any, Iterable, Sequence
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+MODEL_LABELS = {"rnn": "lstm", "transformer": "transformer"}
+ADVANTAGE_LABELS = {"mc": "mc_adv", "gae": "gae_adv"}
+REWARD_LABELS = {"simple": "simple_reward", "multi": "multi_reward"}
 
 try:
     import torch
@@ -25,29 +28,41 @@ class ExperimentSpec:
     name: str
     model_arg: str
     model_label: str
-    enable_curriculum: bool
+    advantage_mode: str
+    reward_mode: str
     seed: int
 
 
-def build_experiment_specs(seeds: Sequence[int]) -> list[ExperimentSpec]:
+def build_experiment_specs(
+    models: Sequence[str],
+    advantage_modes: Sequence[str],
+    reward_modes: Sequence[str],
+    seeds: Sequence[int],
+) -> list[ExperimentSpec]:
     specs: list[ExperimentSpec] = []
-    models = [("rnn", "lstm"), ("transformer", "transformer")]
-    curriculum_modes = [(True, "curriculum_on"), (False, "curriculum_off")]
-
     multi_seed = len(seeds) > 1
-    for model_arg, model_label in models:
-        for enable_curriculum, curriculum_label in curriculum_modes:
-            for seed in seeds:
-                seed_suffix = f"_seed{seed}" if multi_seed else ""
-                specs.append(
-                    ExperimentSpec(
-                        name=f"{model_label}_{curriculum_label}{seed_suffix}",
-                        model_arg=model_arg,
-                        model_label=model_label,
-                        enable_curriculum=enable_curriculum,
-                        seed=seed,
+
+    for model_arg in models:
+        model_label = MODEL_LABELS[model_arg]
+        for advantage_mode in advantage_modes:
+            advantage_label = ADVANTAGE_LABELS[advantage_mode]
+            for reward_mode in reward_modes:
+                reward_label = REWARD_LABELS[reward_mode]
+                for seed in seeds:
+                    seed_suffix = f"_seed{seed}" if multi_seed else ""
+                    specs.append(
+                        ExperimentSpec(
+                            name=(
+                                f"{model_label}_{advantage_label}_{reward_label}"
+                                f"{seed_suffix}"
+                            ),
+                            model_arg=model_arg,
+                            model_label=model_label,
+                            advantage_mode=advantage_mode,
+                            reward_mode=reward_mode,
+                            seed=seed,
+                        )
                     )
-                )
     return specs
 
 
@@ -90,7 +105,8 @@ def collect_experiment_result(
         "experiment": spec.name,
         "model": spec.model_label,
         "model_arg": spec.model_arg,
-        "curriculum": "on" if spec.enable_curriculum else "off",
+        "advantage_mode": spec.advantage_mode,
+        "reward_mode": spec.reward_mode,
         "seed": spec.seed,
         "status": status or ("ok" if return_code == 0 else "failed"),
         "return_code": return_code,
@@ -109,12 +125,8 @@ def collect_experiment_result(
     validation = _json_load(save_dir / "validation_report.json")
     if validation is not None:
         _flatten_scalar_dict(row, "best_val_factor", validation.get("factor_metrics"))
-        _flatten_scalar_dict(
-            row, "strategy", validation.get("strategy_backtest")
-        )
-        _flatten_scalar_dict(
-            row, "benchmark", validation.get("benchmark_backtest")
-        )
+        _flatten_scalar_dict(row, "strategy", validation.get("strategy_backtest"))
+        _flatten_scalar_dict(row, "benchmark", validation.get("benchmark_backtest"))
         row["benchmark_code"] = validation.get("benchmark_code")
         row["warmup_days"] = validation.get("warmup_days")
 
@@ -138,7 +150,7 @@ def collect_experiment_result(
 def build_train_command(
     args: argparse.Namespace, spec: ExperimentSpec, save_dir: Path
 ) -> list[str]:
-    command = [
+    return [
         sys.executable,
         "train.py",
         "--train_start",
@@ -173,6 +185,10 @@ def build_train_command(
         str(args.gamma),
         "--gae_lambda",
         str(args.gae_lambda),
+        "--advantage_mode",
+        spec.advantage_mode,
+        "--reward_mode",
+        spec.reward_mode,
         "--device",
         args.device,
         "--seed",
@@ -190,9 +206,6 @@ def build_train_command(
         "--tf_dropout",
         str(args.tf_dropout),
     ]
-    if not spec.enable_curriculum:
-        command.append("--no_curriculum")
-    return command
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -249,16 +262,17 @@ def write_markdown_report(path: Path, results: Sequence[dict[str, Any]]) -> None
         "",
         f"Generated at: {time.strftime('%Y-%m-%d %H:%M:%S')}",
         "",
-        "| Experiment | Model | Curriculum | Seed | Status | Best Val IC | Best Val ICIR | Final Val IC | Strategy Sharpe | Excess Ann Return |",
-        "| --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
+        "| Experiment | Model | Advantage | Reward | Seed | Status | Best Val IC | Best Val ICIR | Final Val IC | Strategy Sharpe | Excess Ann Return |",
+        "| --- | --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
 
     for row in _sort_results(results):
         lines.append(
-            "| {experiment} | {model} | {curriculum} | {seed} | {status} | {best_val_ic} | {best_val_icir} | {final_val_ic} | {strategy_sharpe} | {excess_ann} |".format(
+            "| {experiment} | {model} | {advantage_mode} | {reward_mode} | {seed} | {status} | {best_val_ic} | {best_val_icir} | {final_val_ic} | {strategy_sharpe} | {excess_ann} |".format(
                 experiment=row.get("experiment", ""),
                 model=row.get("model", ""),
-                curriculum=row.get("curriculum", ""),
+                advantage_mode=row.get("advantage_mode", ""),
+                reward_mode=row.get("reward_mode", ""),
                 seed=row.get("seed", ""),
                 status=row.get("status", ""),
                 best_val_ic=_format_metric(row.get("best_val_factor_ic")),
@@ -321,7 +335,7 @@ def run_command_with_tee(command: Sequence[str], cwd: Path, log_path: Path) -> i
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run a batch comparison for LSTM/Transformer with and without curriculum learning."
+        description="Run ablations for advantage estimation, reward shaping, and transformer."
     )
     parser.add_argument("--train_start", default="20240101")
     parser.add_argument("--train_end", default="20251231")
@@ -347,6 +361,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tf_num_layers", type=int, default=3)
     parser.add_argument("--tf_dim_feedforward", type=int, default=256)
     parser.add_argument("--tf_dropout", type=float, default=0.1)
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        choices=["rnn", "transformer"],
+        default=["rnn", "transformer"],
+    )
+    parser.add_argument(
+        "--advantage_modes",
+        nargs="+",
+        choices=["mc", "gae"],
+        default=["mc", "gae"],
+    )
+    parser.add_argument(
+        "--reward_modes",
+        nargs="+",
+        choices=["simple", "multi"],
+        default=["simple", "multi"],
+    )
     parser.add_argument("--save_root", default="output/batch_compare")
     parser.add_argument("--run_name", default=_default_run_name())
     parser.add_argument("--seeds", nargs="+", type=int, default=[42])
@@ -365,7 +397,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    specs = build_experiment_specs(args.seeds)
+    specs = build_experiment_specs(
+        models=args.models,
+        advantage_modes=args.advantage_modes,
+        reward_modes=args.reward_modes,
+        seeds=args.seeds,
+    )
 
     group_dir = Path(args.save_root) / args.run_name
     group_dir.mkdir(parents=True, exist_ok=True)
@@ -387,7 +424,8 @@ def main() -> int:
                 {
                     "experiment": spec.name,
                     "model": spec.model_label,
-                    "curriculum": "on" if spec.enable_curriculum else "off",
+                    "advantage_mode": spec.advantage_mode,
+                    "reward_mode": spec.reward_mode,
                     "seed": spec.seed,
                     "status": "dry_run",
                     "return_code": 0,

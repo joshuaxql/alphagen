@@ -24,7 +24,6 @@ from tokens import (
     Token,
     TokenType,
     BEG_TOKEN,
-    SEP_TOKEN,
 )
 from expression import (
     parse_rpn_to_tree,
@@ -53,7 +52,6 @@ from reporting import (
 from backtest import Backtester, load_pool_alpha_from_file
 
 BEG_IDX = TOKEN_TO_IDX[Token(TokenType.BEG, BEG_TOKEN)]
-SEP_IDX = TOKEN_TO_IDX[Token(TokenType.SEP, SEP_TOKEN)]
 
 
 def set_random_seed(seed: int) -> None:
@@ -89,118 +87,14 @@ def restore_rng_state(state: dict | None) -> None:
 
 
 # ============================================================
-# 0. 课程学习管理器
-# ============================================================
-class CurriculumManager:
-    """课程学习：从简单表达式逐步过渡到复杂表达式。
-
-    分阶段训练，逐步增加表达式复杂度上限：
-      阶段1: 只允许时序一元操作符 (TS-U)，如 Mean($close, 20)
-      阶段2: 允许时序操作符 (TS-U + TS-B)，如 Corr($close, $vol, 20)
-      阶段3: 允许所有操作符，限制序列长度
-      阶段4: 完全放开
-
-    参数:
-        total_iterations: 总训练轮数
-        max_seq_len: 最大序列长度
-        stage_ratios: 各阶段占比，默认 [0.25, 0.25, 0.25, 0.25]
-    """
-
-    # 各阶段允许的操作符类别
-    STAGE_ALLOWED_OPS = [
-        {"TS-U"},  # 阶段1: 只有时序一元
-        {"TS-U", "TS-B"},  # 阶段2: 时序一元+二元
-        {"TS-U", "TS-B", "CS-U"},  # 阶段3: 加上截面一元
-        None,  # 阶段4: 全部允许
-    ]
-
-    # 各阶段的最大序列长度占比
-    STAGE_SEQ_LEN_RATIO = [0.4, 0.6, 0.8, 1.0]
-
-    def __init__(
-        self,
-        total_iterations: int,
-        max_seq_len: int = 20,
-        stage_ratios: list[float] | None = None,
-    ):
-        self.total_iterations = total_iterations
-        self.max_seq_len = max_seq_len
-        ratios = stage_ratios or [0.25, 0.25, 0.25, 0.25]
-        # 计算各阶段的结束 iteration
-        self.stage_boundaries = []
-        cumulative = 0
-        for r in ratios:
-            cumulative += r
-            self.stage_boundaries.append(int(cumulative * total_iterations))
-
-    def get_stage(self, iteration: int) -> int:
-        """返回当前阶段索引 (0-3)"""
-        for i, boundary in enumerate(self.stage_boundaries):
-            if iteration < boundary:
-                return i
-        return len(self.stage_boundaries) - 1
-
-    def get_allowed_op_categories(self, iteration: int) -> set[str] | None:
-        """返回当前允许的操作符类别集合，None 表示全部允许"""
-        stage = self.get_stage(iteration)
-        return self.STAGE_ALLOWED_OPS[stage]
-
-    def get_max_seq_len(self, iteration: int) -> int:
-        """返回当前阶段的最大序列长度"""
-        stage = self.get_stage(iteration)
-        ratio = self.STAGE_SEQ_LEN_RATIO[stage]
-        return max(4, int(self.max_seq_len * ratio))
-
-    def describe(self, iteration: int) -> str:
-        """返回当前阶段的描述"""
-        stage = self.get_stage(iteration)
-        allowed = self.STAGE_ALLOWED_OPS[stage]
-        seq_len = self.get_max_seq_len(iteration)
-        if allowed is None:
-            return f"阶段{stage+1}: 全部操作符, max_len={seq_len}"
-        return f"阶段{stage+1}: {allowed}, max_len={seq_len}"
-
-    def state_dict(self) -> dict:
-        """返回可 JSON 序列化的状态字典"""
-        return {
-            "total_iterations": self.total_iterations,
-            "max_seq_len": self.max_seq_len,
-            "stage_boundaries": self.stage_boundaries,
-        }
-
-    def save_state(self) -> dict:
-        """兼容测试/恢复流程的别名接口。"""
-        return self.state_dict()
-
-    @classmethod
-    def from_state_dict(cls, state: dict) -> "CurriculumManager":
-        """从状态字典重建 CurriculumManager 实例"""
-        instance = cls.__new__(cls)
-        instance.total_iterations = state["total_iterations"]
-        instance.max_seq_len = state["max_seq_len"]
-        instance.stage_boundaries = list(state["stage_boundaries"])
-        return instance
-
-    @classmethod
-    def from_state(cls, state: dict) -> "CurriculumManager":
-        """兼容测试/恢复流程的别名接口。"""
-        return cls.from_state_dict(state)
-
-
-# ============================================================
-# 1. 单 episode 生成
+# 0. 单 episode 生成
 # ============================================================
 def collect_episode(
     agent: PPOAgent,
     builder: RPNBuilder,
     device: str = "cpu",
-    allowed_op_categories: set[str] | None = None,
 ) -> Episode:
-    """生成一条 RPN 序列。
-
-    参数:
-        allowed_op_categories: 允许的操作符类别，None 表示全部允许。
-    """
+    """生成一条 RPN 序列。"""
     builder.reset()
     ep = Episode()
 
@@ -211,7 +105,7 @@ def collect_episode(
     hidden = agent.net.init_hidden(batch_size=1, device=device)
 
     while not builder.done:
-        valid_mask = builder.get_valid_mask(allowed_op_categories=allowed_op_categories)
+        valid_mask = builder.get_valid_mask()
 
         if not valid_mask.any():
             break
@@ -232,16 +126,17 @@ def collect_episode(
 
 
 # ============================================================
-# 2. 评估 episode 并计算 reward
+# 1. 评估 episode 并计算 reward
 # ============================================================
 def evaluate_episode(
     ep: Episode,
     combination: AlphaCombinationModel,
+    reward_mode: str = "multi",
 ) -> dict:
     """
     解析 episode 的 token 序列，评估 alpha，加入组合模型。
     返回结构化结果：
-      - reward: PPO 使用的奖励（多目标）
+      - reward: PPO 使用的奖励
       - accepted: 新 alpha 是否被接纳进组合
       - formula: 表达式字符串（若可解析）
       - candidate_ic: 该 alpha 单独对 target 的 IC
@@ -300,42 +195,46 @@ def evaluate_episode(
 
     if combination.last_add_accepted:
         ic_delta = new_ic - old_ic
-        icir_delta = combination.last_add_icir_delta
+        if reward_mode == "simple":
+            reward = 10.0 * ic_delta
+        elif reward_mode == "multi":
+            icir_delta = combination.last_add_icir_delta
 
-        # 计算候选 alpha 的 Rank IC（Spearman 相关系数）
-        candidate_rank_ic = calc_rank_ic(alpha_val, combination.target)
+            # 计算候选 alpha 的 Rank IC（Spearman 相关系数）
+            candidate_rank_ic = calc_rank_ic(alpha_val, combination.target)
 
-        # 正负平衡奖励：如果新因子IC方向与多数池内因子相反，给奖励
-        pos_count = sum(1 for ic in combination.ic_vector if ic > 0)
-        neg_count = len(combination.ic_vector) - pos_count
-        balance_bonus = 0.0
-        candidate_ic_sign = combination.last_add_candidate_ic
-        if candidate_ic_sign > 0 and pos_count < neg_count:
-            balance_bonus = 0.05
-        elif candidate_ic_sign < 0 and neg_count < pos_count:
-            balance_bonus = 0.05
+            # 正负平衡奖励：如果新因子IC方向与多数池内因子相反，给奖励
+            pos_count = sum(1 for ic in combination.ic_vector if ic > 0)
+            neg_count = len(combination.ic_vector) - pos_count
+            balance_bonus = 0.0
+            candidate_ic_sign = combination.last_add_candidate_ic
+            if candidate_ic_sign > 0 and pos_count < neg_count:
+                balance_bonus = 0.05
+            elif candidate_ic_sign < 0 and neg_count < pos_count:
+                balance_bonus = 0.05
 
-        # 冗余惩罚：与已有因子相关性越高，惩罚越大
-        redundancy_penalty = 0.0
-        if combination.pool_size > 1:
-            # 取最后一个因子（刚加入的）与池中其他因子的最大互相关
-            last_idx = combination.pool_size - 1
-            max_mutual = (
-                max(abs(combination.ic_matrix[last_idx, j]) for j in range(last_idx))
-                if last_idx > 0
-                else 0.0
+            # 冗余惩罚：与已有因子相关性越高，惩罚越大
+            redundancy_penalty = 0.0
+            if combination.pool_size > 1:
+                # 取最后一个因子（刚加入的）与池中其他因子的最大互相关
+                last_idx = combination.pool_size - 1
+                max_mutual = (
+                    max(abs(combination.ic_matrix[last_idx, j]) for j in range(last_idx))
+                    if last_idx > 0
+                    else 0.0
+                )
+                if max_mutual > 0.7:
+                    redundancy_penalty = (max_mutual - 0.7) * 0.5
+
+            reward = (
+                10.0 * ic_delta
+                + 3.0 * icir_delta
+                + 2.0 * candidate_rank_ic
+                + balance_bonus
+                - redundancy_penalty
             )
-            if max_mutual > 0.7:
-                redundancy_penalty = (max_mutual - 0.7) * 0.5
-
-        # 多目标奖励
-        reward = (
-            10.0 * ic_delta  # IC增量（主目标）
-            + 3.0 * icir_delta  # ICIR增量（稳定性）
-            + 2.0 * candidate_rank_ic  # Rank IC（鲁棒性）
-            + balance_bonus  # 正负平衡
-            - redundancy_penalty  # 冗余惩罚
-        )
+        else:
+            raise ValueError(f"Unknown reward_mode: {reward_mode}")
 
         return _result(
             reward=reward,
@@ -362,7 +261,7 @@ def evaluate_episode(
 
 
 # ============================================================
-# 3. 主训练函数
+# 2. 主训练函数
 # ============================================================
 def train(
     stock_data: StockData,
@@ -380,7 +279,8 @@ def train(
     save_dir: str = "checkpoints",
     gamma: float = 0.99,
     gae_lambda: float = 0.95,
-    enable_curriculum: bool = True,
+    advantage_mode: str = "gae",
+    reward_mode: str = "multi",
     model_type: str = "rnn",
     # Transformer 专用参数
     tf_embed_dim: int = 64,
@@ -420,13 +320,13 @@ def train(
         net = AlphaGenNet(vocab_size=VOCAB_SIZE)
         print(f"模型: LSTM (embed_dim=32, hidden_dim=128, num_layers=2)")
 
-    agent = PPOAgent(net, lr=lr, device=device, gamma=gamma, gae_lambda=gae_lambda)
-
-    # 课程学习管理器
-    curriculum = (
-        CurriculumManager(total_iterations=num_iterations, max_seq_len=max_seq_len)
-        if enable_curriculum
-        else None
+    agent = PPOAgent(
+        net,
+        lr=lr,
+        device=device,
+        gamma=gamma,
+        gae_lambda=gae_lambda,
+        advantage_mode=advantage_mode,
     )
 
     builder = RPNBuilder(max_len=max_seq_len)
@@ -464,10 +364,6 @@ def train(
             if combination_state is not None:
                 restore_combination_state(combination, combination_state)
 
-            if curriculum is not None:
-                curriculum_state = resume_state.get("curriculum_state")
-                if curriculum_state is not None:
-                    curriculum = CurriculumManager.from_state(curriculum_state)
             restore_rng_state(resume_state.get("rng_state"))
 
             metadata = resume_state.get("metadata") or load_checkpoint_metadata(
@@ -487,12 +383,8 @@ def train(
     print(f"开始训练: {num_iterations} 轮, 每轮 {episodes_per_iter} episode")
     print(f"设备: {device}, 股票数: {stock_data.n_stocks}, 交易日: {stock_data.n_days}")
     print("股票过滤: 默认排除北交所(BJ)和ST股票")
-    if curriculum is not None:
-        print(
-            f"课程学习: 已启用 ({curriculum.describe(0)} → {curriculum.describe(num_iterations-1)})"
-        )
-    else:
-        print("课程学习: 未启用")
+    print(f"优势估计: {advantage_mode}")
+    print(f"奖励函数: {reward_mode}")
     if val_data_context is not None:
         print(
             f"验证集: 股票数 {val_data_context.stock_data.n_stocks}, "
@@ -516,25 +408,18 @@ def train(
         valid_count = 0
         accepted_alphas = []
 
-        # 课程学习：根据当前 iteration 调整参数
-        allowed_ops = None
-        if curriculum is not None:
-            allowed_ops = curriculum.get_allowed_op_categories(iteration)
-            builder.max_len = curriculum.get_max_seq_len(iteration)
-
         # 收集 episodes
         for _ in range(episodes_per_iter):
-            ep = collect_episode(
-                agent,
-                builder,
-                device=device,
-                allowed_op_categories=allowed_ops,
-            )
+            ep = collect_episode(agent, builder, device=device)
 
             if len(ep.actions) == 0:
                 continue
 
-            episode_result = evaluate_episode(ep, combination)
+            episode_result = evaluate_episode(
+                ep,
+                combination,
+                reward_mode=reward_mode,
+            )
             reward = episode_result["reward"]
             ep.reward = reward
             episodes.append(ep)
@@ -623,7 +508,6 @@ def train(
             f"v_loss={stats.get('value_loss', 0):.4f}  "
             f"entropy={stats.get('entropy', 0):.3f}  "
             f"time={elapsed:.1f}s"
-            + (f"  [{curriculum.describe(iteration)}]" if curriculum else "")
         )
         if accepted_alphas:
             for idx, info in enumerate(accepted_alphas, start=1):
@@ -646,7 +530,6 @@ def train(
                 iteration=iteration + 1,
                 best_score=best_score,
                 history=history,
-                curriculum=curriculum,
             )
 
         save_checkpoint(
@@ -658,7 +541,6 @@ def train(
             iteration=iteration + 1,
             best_score=best_score,
             history=history,
-            curriculum=curriculum,
         )
 
         # 每 20 轮保存
@@ -672,7 +554,6 @@ def train(
                 iteration=iteration + 1,
                 best_score=best_score,
                 history=history,
-                curriculum=curriculum,
             )
 
     # 最终保存
@@ -685,7 +566,6 @@ def train(
         iteration=len(history),
         best_score=best_score,
         history=history,
-        curriculum=curriculum,
     )
     save_training_history(history, save_dir)
     plot_training_history(history, os.path.join(save_dir, "training_metrics.png"))
@@ -707,6 +587,9 @@ def train(
     )
     summary = {
         "best_selection_score": float(best_score) if np.isfinite(best_score) else None,
+        "advantage_mode": advantage_mode,
+        "reward_mode": reward_mode,
+        "model_type": model_type,
         "final_train_metrics": final_train_metrics,
         "final_val_metrics": final_val_metrics,
         "history_length": len(history),
@@ -794,7 +677,6 @@ def save_checkpoint(
     iteration: int | None = None,
     best_score: float | None = None,
     history: list[dict] | None = None,
-    curriculum: CurriculumManager | None = None,
 ):
     os.makedirs(save_dir, exist_ok=True)
     iteration, best_score, history = _coerce_checkpoint_metadata(
@@ -835,7 +717,6 @@ def save_checkpoint(
         "net_state_dict": net.state_dict(),
         "agent_state": None if agent is None else agent.state_dict(),
         "combination_state": build_combination_checkpoint_state(combination),
-        "curriculum_state": None if curriculum is None else curriculum.save_state(),
         "rng_state": capture_rng_state(),
     }
     torch.save(training_state, _tagged_training_state_path(save_dir, tag))
@@ -898,7 +779,7 @@ def load_training_state(
     tag: str = "latest",
     device: str = "cpu",
 ) -> dict | None:
-    """加载包含 agent / pool / curriculum / metadata 的训练状态。"""
+    """加载包含 agent / pool / metadata 的训练状态。"""
     state_path = (
         os.path.join(save_dir, "training_state.pt")
         if tag == "latest"
@@ -958,16 +839,29 @@ def main():
     parser.add_argument("--benchmark_code", default="000300.SH", help="基准指数代码")
     # ── 输出与设备 ──
     parser.add_argument("--save_dir", default="outputs", help="输出目录")
-    parser.add_argument("--gamma", type=float, default=0.99, help="GAE discount factor")
-    parser.add_argument("--gae_lambda", type=float, default=0.95, help="GAE lambda")
     parser.add_argument(
-        "--enable_curriculum", action="store_true", default=True, help="启用课程学习"
+        "--gamma",
+        type=float,
+        default=0.99,
+        help="[GAE] discount factor / [MC] 保留为兼容参数",
     )
     parser.add_argument(
-        "--no_curriculum",
-        action="store_false",
-        dest="enable_curriculum",
-        help="禁用课程学习",
+        "--gae_lambda",
+        type=float,
+        default=0.95,
+        help="[GAE] lambda 参数；advantage_mode=mc 时忽略",
+    )
+    parser.add_argument(
+        "--advantage_mode",
+        choices=["gae", "mc"],
+        default="gae",
+        help="优势估计方式: gae 或 mc(旧版 Monte Carlo 基线)",
+    )
+    parser.add_argument(
+        "--reward_mode",
+        choices=["simple", "multi"],
+        default="multi",
+        help="奖励函数: simple=仅IC增量, multi=多目标奖励",
     )
     parser.add_argument(
         "--device",
@@ -1055,7 +949,8 @@ def main():
         save_dir=args.save_dir,
         gamma=args.gamma,
         gae_lambda=args.gae_lambda,
-        enable_curriculum=args.enable_curriculum,
+        advantage_mode=args.advantage_mode,
+        reward_mode=args.reward_mode,
         model_type=args.model,
         tf_embed_dim=args.tf_embed_dim,
         tf_nhead=args.tf_nhead,
