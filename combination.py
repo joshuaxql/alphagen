@@ -367,9 +367,10 @@ class AlphaCombinationModel:
         if self.pool_size > self.max_pool_size:
             self._remove_weakest()
 
-        # 6. 检查是否真正提升了组合IC，否则回滚
+        # 6. 检查是否真正提升了组合IC（增量必须严格大于1e-6），否则回滚
         new_ic = self.get_combination_ic()
-        if (not np.isfinite(new_ic)) or (new_ic < old_ic - 1e-6 and k > 0):
+        ic_delta = new_ic - old_ic
+        if (not np.isfinite(new_ic)) or (ic_delta <= 1e-6 and k > 0):
             # 完整回滚所有状态
             self.alpha_exprs = old_exprs
             self.alpha_values = old_values

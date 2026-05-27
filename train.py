@@ -76,10 +76,10 @@ class CurriculumManager:
 
     # 各阶段允许的操作符类别
     STAGE_ALLOWED_OPS = [
-        {"TS-U"},                    # 阶段1: 只有时序一元
-        {"TS-U", "TS-B"},            # 阶段2: 时序一元+二元
-        {"TS-U", "TS-B", "CS-U"},    # 阶段3: 加上截面一元
-        None,                         # 阶段4: 全部允许
+        {"TS-U"},  # 阶段1: 只有时序一元
+        {"TS-U", "TS-B"},  # 阶段2: 时序一元+二元
+        {"TS-U", "TS-B", "CS-U"},  # 阶段3: 加上截面一元
+        None,  # 阶段4: 全部允许
     ]
 
     # 各阶段的最大序列长度占比
@@ -153,9 +153,7 @@ def collect_episode(
     hidden = agent.net.init_hidden(batch_size=1, device=device)
 
     while not builder.done:
-        valid_mask = builder.get_valid_mask(
-            allowed_op_categories=allowed_op_categories
-        )
+        valid_mask = builder.get_valid_mask(allowed_op_categories=allowed_op_categories)
 
         if not valid_mask.any():
             break
@@ -192,6 +190,7 @@ def evaluate_episode(
       - ic_delta: 接纳后带来的组合 IC 增量
       - status: 接纳/拒绝原因
     """
+
     def _result(
         reward: float,
         accepted: bool = False,
@@ -255,24 +254,8 @@ def evaluate_episode(
 
     if combination.last_add_accepted:
         ic_delta = new_ic - old_ic
-
-        # 硬门槛：ic_delta必须严格大于1e-6，否则视为无效接受并回滚
-        if ic_delta <= 1e-6:
-            # 回滚：移除刚加入的因子
-            if combination.pool_size > 0:
-                combination.alpha_exprs.pop()
-                combination.alpha_values.pop()
-                combination.weights = combination.weights[:-1]
-                if combination.pool_size > 0:
-                    combination.ic_matrix = combination.ic_matrix[:-1, :-1]
-            return _result(
-                reward=-0.15,
-                accepted=False,
-                formula=formula,
-                candidate_ic=combination.last_add_candidate_ic,
-                ic_delta=ic_delta,
-                status="rejected_no_improve",
-            )
+        # ic_delta 硬门槛已在 combination.add_alpha() 内部处理
+        # 此处 ic_delta 一定严格大于 1e-6
 
         icir_delta = combination.last_add_icir_delta
 
@@ -297,10 +280,11 @@ def evaluate_episode(
         if combination.pool_size > 1:
             # 取最后一个因子（刚加入的）与池中其他因子的最大互相关
             last_idx = combination.pool_size - 1
-            max_mutual = max(
-                abs(combination.ic_matrix[last_idx, j])
-                for j in range(last_idx)
-            ) if last_idx > 0 else 0.0
+            max_mutual = (
+                max(abs(combination.ic_matrix[last_idx, j]) for j in range(last_idx))
+                if last_idx > 0
+                else 0.0
+            )
             if max_mutual > 0.7:
                 redundancy_penalty = (max_mutual - 0.7) * 0.5
 
@@ -313,13 +297,13 @@ def evaluate_episode(
 
         # 多目标奖励
         reward = (
-            50.0 * ic_delta        # IC增量（主目标，压倒性权重）
-            + 3.0 * icir_delta     # ICIR增量（稳定性）
+            50.0 * ic_delta  # IC增量（主目标，压倒性权重）
+            + 3.0 * icir_delta  # ICIR增量（稳定性）
             + 2.0 * candidate_rank_ic  # Rank IC（鲁棒性）
-            + direction_bonus      # 基础方向奖励（鼓励正IC）
-            + balance_bonus        # 正负平衡（大幅增强）
-            - redundancy_penalty   # 冗余惩罚
-            - complexity_penalty   # 复杂度惩罚
+            + direction_bonus  # 基础方向奖励（鼓励正IC）
+            + balance_bonus  # 正负平衡（大幅增强）
+            - redundancy_penalty  # 冗余惩罚
+            - complexity_penalty  # 复杂度惩罚
         )
 
         return _result(
@@ -384,6 +368,7 @@ def train(
     # 根据 model_type 初始化网络
     if model_type == "transformer":
         from generator_transformer import AlphaGenTransformer
+
         net = AlphaGenTransformer(
             vocab_size=VOCAB_SIZE,
             embed_dim=tf_embed_dim,
@@ -393,19 +378,24 @@ def train(
             dropout=tf_dropout,
             max_seq_len=max_seq_len,
         )
-        print(f"模型: Transformer (embed_dim={tf_embed_dim}, nhead={tf_nhead}, "
-              f"layers={tf_num_layers}, ff_dim={tf_dim_feedforward}, dropout={tf_dropout})")
+        print(
+            f"模型: Transformer (embed_dim={tf_embed_dim}, nhead={tf_nhead}, "
+            f"layers={tf_num_layers}, ff_dim={tf_dim_feedforward}, dropout={tf_dropout})"
+        )
     else:
         from generator import AlphaGenNet
+
         net = AlphaGenNet(vocab_size=VOCAB_SIZE)
         print(f"模型: LSTM (embed_dim=32, hidden_dim=128, num_layers=2)")
 
     agent = PPOAgent(net, lr=lr, device=device, gamma=gamma, gae_lambda=gae_lambda)
 
     # 课程学习管理器
-    curriculum = CurriculumManager(
-        total_iterations=num_iterations, max_seq_len=max_seq_len
-    ) if enable_curriculum else None
+    curriculum = (
+        CurriculumManager(total_iterations=num_iterations, max_seq_len=max_seq_len)
+        if enable_curriculum
+        else None
+    )
 
     builder = RPNBuilder(max_len=max_seq_len)
     val_evaluator = (
@@ -426,8 +416,7 @@ def train(
     start_iteration = 0
     best_score = -np.inf
     history = []
-    val_ic_history: List[float] = []  # P1: 跟踪验证IC历史
-    pool_state_history: List[dict] = []  # P1: 每轮池子状态快照，用于回退
+    val_ic_history: List[float] = []  # 跟踪验证IC历史
 
     if resume_from is not None:
         ckpt_path = (
@@ -439,11 +428,15 @@ def train(
             ckpt_path, combination, net, agent, device=device
         )
 
-    print(f"开始训练: 总{num_iterations}轮, 从第{start_iteration + 1}轮继续, 每轮{episodes_per_iter}个episode")
+    print(
+        f"开始训练: 总{num_iterations}轮, 从第{start_iteration + 1}轮继续, 每轮{episodes_per_iter}个episode"
+    )
     print(f"设备: {device}, 股票数: {stock_data.n_stocks}, 交易日: {stock_data.n_days}")
     print("股票过滤: 默认排除北交所(BJ)和ST股票")
     if curriculum is not None:
-        print(f"课程学习: 已启用 ({curriculum.describe(0)} → {curriculum.describe(num_iterations-1)})")
+        print(
+            f"课程学习: 已启用 ({curriculum.describe(0)} → {curriculum.describe(num_iterations-1)})"
+        )
     else:
         print("课程学习: 未启用")
     if val_data_context is not None:
@@ -478,7 +471,9 @@ def train(
         # 收集 episodes
         for _ in range(episodes_per_iter):
             ep = collect_episode(
-                agent, builder, device=device,
+                agent,
+                builder,
+                device=device,
                 allowed_op_categories=allowed_ops,
             )
 
@@ -559,34 +554,9 @@ def train(
         }
         history.append(row)
 
-        # P1改进：验证IC连续3轮下降则回退到下降前的池子状态
+        # 记录验证IC历史
         if val_metrics is not None and np.isfinite(val_metrics["ic"]):
             val_ic_history.append(float(val_metrics["ic"]))
-            # 同时保存当前池子状态快照
-            pool_state_history.append(combination.save_state())
-            # 只保留最近10轮的状态，避免内存无限增长
-            if len(pool_state_history) > 10:
-                pool_state_history.pop(0)
-                val_ic_history.pop(0)
-
-            if len(val_ic_history) >= 4:
-                # 检查最近3轮是否连续下降
-                recent_4 = val_ic_history[-4:]
-                if recent_4[0] > recent_4[1] > recent_4[2] > recent_4[3]:
-                    # 回退到下降开始前的池子状态（recent_4[0]对应的状态）
-                    rollback_state = pool_state_history[-4]
-                    print(
-                        f"  [!] 验证IC连续3轮下降: {recent_4[0]:.4f} -> "
-                        f"{recent_4[1]:.4f} -> {recent_4[2]:.4f} -> {recent_4[3]:.4f}"
-                    )
-                    print(
-                        f"  [!] 回退到下降前状态 (pool_size={len(rollback_state['alpha_exprs'])}),"
-                        f" 丢弃下降期间加入的因子"
-                    )
-                    combination.restore_state(rollback_state)
-                    # 清空历史，从回退后的状态重新开始跟踪
-                    val_ic_history.clear()
-                    pool_state_history.clear()
 
         print(
             f"[{iteration+1:3d}/{num_iterations}] "
@@ -618,30 +588,54 @@ def train(
         if selection_score > best_score and combination.pool_size > 0:
             best_score = selection_score
             save_checkpoint(
-                combination, net, agent, save_dir,
-                iteration, best_score, history, val_ic_history,
+                combination,
+                net,
+                agent,
+                save_dir,
+                iteration,
+                best_score,
+                history,
+                val_ic_history,
                 tag="best",
             )
 
         # 每轮保存最新checkpoint（用于断点续训）
         save_checkpoint(
-            combination, net, agent, save_dir,
-            iteration, best_score, history, val_ic_history,
+            combination,
+            net,
+            agent,
+            save_dir,
+            iteration,
+            best_score,
+            history,
+            val_ic_history,
             tag="latest",
         )
 
         # 每 20 轮额外保存一个带iter标签的checkpoint
         if (iteration + 1) % 20 == 0:
             save_checkpoint(
-                combination, net, agent, save_dir,
-                iteration, best_score, history, val_ic_history,
+                combination,
+                net,
+                agent,
+                save_dir,
+                iteration,
+                best_score,
+                history,
+                val_ic_history,
                 tag=f"iter{iteration+1}",
             )
 
     # 最终保存
     save_checkpoint(
-        combination, net, agent, save_dir,
-        num_iterations - 1, best_score, history, val_ic_history,
+        combination,
+        net,
+        agent,
+        save_dir,
+        num_iterations - 1,
+        best_score,
+        history,
+        val_ic_history,
         tag="final",
     )
     save_training_history(history, save_dir)
@@ -723,12 +717,14 @@ def save_checkpoint(
     with open(os.path.join(save_dir, f"pool_{tag}.json"), "w", encoding="utf-8") as f:
         json.dump(pool_info, f, ensure_ascii=False, indent=2)
 
-    print(f"  [Checkpoint] 已保存到 {ckpt_path} (iter={iteration}, pool={combination.pool_size})")
+    print(
+        f"  [Checkpoint] 已保存到 {ckpt_path} (iter={iteration}, pool={combination.pool_size})"
+    )
 
 
 def load_checkpoint(checkpoint_path, combination, net, agent, device="cpu"):
     """从checkpoint恢复训练状态
-    
+
     返回: (start_iteration, best_score, history, val_ic_history)
     """
     if not os.path.isfile(checkpoint_path):
@@ -754,7 +750,9 @@ def load_checkpoint(checkpoint_path, combination, net, agent, device="cpu"):
     val_ic_history = checkpoint.get("val_ic_history", [])
 
     print(f"[Resume] 将从第 {start_iteration + 1} 轮继续训练")
-    print(f"[Resume] 当前 best_score={best_score:.4f}, pool_size={combination.pool_size}")
+    print(
+        f"[Resume] 当前 best_score={best_score:.4f}, pool_size={combination.pool_size}"
+    )
 
     return start_iteration, best_score, history, val_ic_history
 
@@ -767,12 +765,20 @@ def main():
 
     parser = argparse.ArgumentParser(description="Alpha 因子生成训练管线")
     # ── 数据参数 ──
-    parser.add_argument("--train_start", default="20190101", help="训练集起始日期 (YYYYMMDD)")
-    parser.add_argument("--train_end", default="20241231", help="训练集结束日期 (YYYYMMDD)")
-    parser.add_argument("--val_start", default="20250101", help="验证集起始日期 (YYYYMMDD)")
-    parser.add_argument("--val_end", default="20251231", help="验证集结束日期 (YYYYMMDD)")
+    parser.add_argument(
+        "--train_start", default="20190101", help="训练集起始日期 (YYYYMMDD)"
+    )
+    parser.add_argument(
+        "--train_end", default="20241231", help="训练集结束日期 (YYYYMMDD)"
+    )
+    parser.add_argument(
+        "--val_start", default="20250101", help="验证集起始日期 (YYYYMMDD)"
+    )
+    parser.add_argument(
+        "--val_end", default="20251231", help="验证集结束日期 (YYYYMMDD)"
+    )
     # ── 训练参数 ──
-    parser.add_argument("--iterations", type=int, default=20, help="训练轮数")
+    parser.add_argument("--iterations", type=int, default=50, help="训练轮数")
     parser.add_argument("--episodes", type=int, default=64, help="每轮 episode 数")
     parser.add_argument("--pool_size", type=int, default=15, help="Alpha 池最大容量")
     parser.add_argument("--horizon", type=int, default=3, help="目标收益前瞻天数")
@@ -791,20 +797,43 @@ def main():
     )
     parser.add_argument("--gamma", type=float, default=0.99, help="GAE discount factor")
     parser.add_argument("--gae_lambda", type=float, default=0.95, help="GAE lambda")
-    parser.add_argument("--enable_curriculum", action="store_true", default=True, help="启用课程学习")
-    parser.add_argument("--no_curriculum", action="store_false", dest="enable_curriculum", help="禁用课程学习")
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu", help="训练设备 (cpu/cuda)")
+    parser.add_argument(
+        "--enable_curriculum", action="store_true", default=True, help="启用课程学习"
+    )
+    parser.add_argument(
+        "--no_curriculum",
+        action="store_false",
+        dest="enable_curriculum",
+        help="禁用课程学习",
+    )
+    parser.add_argument(
+        "--device",
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="训练设备 (cpu/cuda)",
+    )
     # ── 模型选择 ──
     parser.add_argument(
-        "--model", choices=["rnn", "transformer"], default="rnn",
-        help="策略网络类型: rnn (LSTM, 默认) 或 transformer"
+        "--model",
+        choices=["rnn", "transformer"],
+        default="rnn",
+        help="策略网络类型: rnn (LSTM, 默认) 或 transformer",
     )
     # ── Transformer 专用参数 ──
-    parser.add_argument("--tf_embed_dim", type=int, default=64, help="[Transformer] embedding 维度")
-    parser.add_argument("--tf_nhead", type=int, default=4, help="[Transformer] 注意力头数")
-    parser.add_argument("--tf_num_layers", type=int, default=3, help="[Transformer] Encoder 层数")
-    parser.add_argument("--tf_dim_feedforward", type=int, default=256, help="[Transformer] 前馈网络维度")
-    parser.add_argument("--tf_dropout", type=float, default=0.1, help="[Transformer] Dropout 概率")
+    parser.add_argument(
+        "--tf_embed_dim", type=int, default=64, help="[Transformer] embedding 维度"
+    )
+    parser.add_argument(
+        "--tf_nhead", type=int, default=4, help="[Transformer] 注意力头数"
+    )
+    parser.add_argument(
+        "--tf_num_layers", type=int, default=3, help="[Transformer] Encoder 层数"
+    )
+    parser.add_argument(
+        "--tf_dim_feedforward", type=int, default=256, help="[Transformer] 前馈网络维度"
+    )
+    parser.add_argument(
+        "--tf_dropout", type=float, default=0.1, help="[Transformer] Dropout 概率"
+    )
     args = parser.parse_args()
 
     print("加载训练集数据...")
