@@ -41,7 +41,9 @@ from expression import (
 from calculator import StockData, calc_rank_ic
 from combination import AlphaCombinationModel
 from masking import RPNBuilder
-from generator import PPOAgent, GRPOAgent, Episode
+from ppo import PPOAgent
+from grpo import GRPOAgent
+from episode import Episode
 from data import Data
 from common import ADJUST_PREV
 from reporting import (
@@ -139,6 +141,16 @@ def evaluate_episode(
     ep: Episode,
     combination: AlphaCombinationModel,
     reward_mode: str = "multi",
+    # 多目标奖励函数参数
+    reward_ic_weight: float = 10.0,
+    reward_icir_weight: float = 3.0,
+    reward_rank_ic_weight: float = 2.0,
+    reward_balance_bonus: float = 0.05,
+    reward_redundancy_threshold: float = 0.7,
+    reward_redundancy_coef: float = 0.5,
+    reward_reject_low_ic: float = -0.2,
+    reward_reject_redundant: float = -0.15,
+    reward_reject_no_improve: float = -0.1,
 ) -> dict:
     """
     解析 episode 的 token 序列，评估 alpha，加入组合模型。
@@ -203,7 +215,7 @@ def evaluate_episode(
     if combination.last_add_accepted:
         ic_delta = new_ic - old_ic
         if reward_mode == "simple":
-            reward = 10.0 * ic_delta
+            reward = reward_ic_weight * ic_delta
         elif reward_mode == "multi":
             icir_delta = combination.last_add_icir_delta
 
@@ -216,9 +228,9 @@ def evaluate_episode(
             balance_bonus = 0.0
             candidate_ic_sign = combination.last_add_candidate_ic
             if candidate_ic_sign > 0 and pos_count < neg_count:
-                balance_bonus = 0.05
+                balance_bonus = reward_balance_bonus
             elif candidate_ic_sign < 0 and neg_count < pos_count:
-                balance_bonus = 0.05
+                balance_bonus = reward_balance_bonus
 
             # 冗余惩罚：与已有因子相关性越高，惩罚越大
             redundancy_penalty = 0.0
@@ -230,13 +242,13 @@ def evaluate_episode(
                     if last_idx > 0
                     else 0.0
                 )
-                if max_mutual > 0.7:
-                    redundancy_penalty = (max_mutual - 0.7) * 0.5
+                if max_mutual > reward_redundancy_threshold:
+                    redundancy_penalty = (max_mutual - reward_redundancy_threshold) * reward_redundancy_coef
 
             reward = (
-                10.0 * ic_delta
-                + 3.0 * icir_delta
-                + 2.0 * candidate_rank_ic
+                reward_ic_weight * ic_delta
+                + reward_icir_weight * icir_delta
+                + reward_rank_ic_weight * candidate_rank_ic
                 + balance_bonus
                 - redundancy_penalty
             )
@@ -253,9 +265,9 @@ def evaluate_episode(
         )
 
     rejection_penalty = {
-        "rejected_low_ic": -0.2,
-        "rejected_redundant": -0.15,
-        "rejected_no_improve": -0.1,
+        "rejected_low_ic": reward_reject_low_ic,
+        "rejected_redundant": reward_reject_redundant,
+        "rejected_no_improve": reward_reject_no_improve,
     }
     return _result(
         reward=rejection_penalty.get(combination.last_add_status, -1.0),
@@ -286,6 +298,16 @@ def train(
     save_dir: str = "checkpoints",
     gamma: float = 0.99,
     reward_mode: str = "multi",
+    # 多目标奖励函数参数
+    reward_ic_weight: float = 10.0,
+    reward_icir_weight: float = 3.0,
+    reward_rank_ic_weight: float = 2.0,
+    reward_balance_bonus: float = 0.05,
+    reward_redundancy_threshold: float = 0.7,
+    reward_redundancy_coef: float = 0.5,
+    reward_reject_low_ic: float = -0.2,
+    reward_reject_redundant: float = -0.15,
+    reward_reject_no_improve: float = -0.1,
     model_type: str = "rnn",
     rl_algo: str = "ppo",
     grpo_group_size: int = 64,
@@ -307,7 +329,7 @@ def train(
 
     # 根据 model_type 初始化网络
     if model_type == "transformer":
-        from generator_transformer import AlphaGenTransformer
+        from transformer import AlphaGenTransformer
 
         net = AlphaGenTransformer(
             vocab_size=VOCAB_SIZE,
@@ -323,7 +345,7 @@ def train(
             f"layers={tf_num_layers}, ff_dim={tf_dim_feedforward}, dropout={tf_dropout})"
         )
     else:
-        from generator import AlphaGenNet
+        from lstm import AlphaGenNet
 
         net = AlphaGenNet(vocab_size=VOCAB_SIZE)
         print(f"模型: LSTM (embed_dim=32, hidden_dim=128, num_layers=2)")
@@ -436,6 +458,16 @@ def train(
                 ep,
                 combination,
                 reward_mode=reward_mode,
+                # 多目标奖励参数
+                reward_ic_weight=reward_ic_weight,
+                reward_icir_weight=reward_icir_weight,
+                reward_rank_ic_weight=reward_rank_ic_weight,
+                reward_balance_bonus=reward_balance_bonus,
+                reward_redundancy_threshold=reward_redundancy_threshold,
+                reward_redundancy_coef=reward_redundancy_coef,
+                reward_reject_low_ic=reward_reject_low_ic,
+                reward_reject_redundant=reward_reject_redundant,
+                reward_reject_no_improve=reward_reject_no_improve,
             )
             reward = episode_result["reward"]
             ep.reward = reward
@@ -867,6 +899,61 @@ def main():
         default="multi",
         help="奖励函数: simple=仅IC增量, multi=多目标奖励",
     )
+    # ── 多目标奖励函数参数 ──
+    parser.add_argument(
+        "--reward_ic_weight",
+        type=float,
+        default=10.0,
+        help="[multi] IC 增量权重",
+    )
+    parser.add_argument(
+        "--reward_icir_weight",
+        type=float,
+        default=3.0,
+        help="[multi] ICIR 增量权重",
+    )
+    parser.add_argument(
+        "--reward_rank_ic_weight",
+        type=float,
+        default=2.0,
+        help="[multi] Rank IC 权重",
+    )
+    parser.add_argument(
+        "--reward_balance_bonus",
+        type=float,
+        default=0.05,
+        help="[multi] 正负平衡奖励",
+    )
+    parser.add_argument(
+        "--reward_redundancy_threshold",
+        type=float,
+        default=0.7,
+        help="[multi] 冗余惩罚阈值（互相关）",
+    )
+    parser.add_argument(
+        "--reward_redundancy_coef",
+        type=float,
+        default=0.5,
+        help="[multi] 冗余惩罚系数",
+    )
+    parser.add_argument(
+        "--reward_reject_low_ic",
+        type=float,
+        default=-0.2,
+        help="[multi] 拒绝低IC的惩罚",
+    )
+    parser.add_argument(
+        "--reward_reject_redundant",
+        type=float,
+        default=-0.15,
+        help="[multi] 拒绝冗余因子的惩罚",
+    )
+    parser.add_argument(
+        "--reward_reject_no_improve",
+        type=float,
+        default=-0.1,
+        help="[multi] 拒绝无提升因子的惩罚",
+    )
     parser.add_argument(
         "--device",
         default="cuda" if torch.cuda.is_available() else "cpu",
@@ -971,6 +1058,16 @@ def main():
         save_dir=args.save_dir,
         gamma=args.gamma,
         reward_mode=args.reward_mode,
+        # 多目标奖励函数参数
+        reward_ic_weight=args.reward_ic_weight,
+        reward_icir_weight=args.reward_icir_weight,
+        reward_rank_ic_weight=args.reward_rank_ic_weight,
+        reward_balance_bonus=args.reward_balance_bonus,
+        reward_redundancy_threshold=args.reward_redundancy_threshold,
+        reward_redundancy_coef=args.reward_redundancy_coef,
+        reward_reject_low_ic=args.reward_reject_low_ic,
+        reward_reject_redundant=args.reward_reject_redundant,
+        reward_reject_no_improve=args.reward_reject_no_improve,
         model_type=args.model,
         rl_algo=args.rl_algo,
         grpo_group_size=args.grpo_group_size,

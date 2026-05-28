@@ -178,6 +178,24 @@ def build_train_command(
         str(args.gamma),
         "--reward_mode",
         spec.reward_mode,
+        "--reward_ic_weight",
+        str(args.reward_ic_weight),
+        "--reward_icir_weight",
+        str(args.reward_icir_weight),
+        "--reward_rank_ic_weight",
+        str(args.reward_rank_ic_weight),
+        "--reward_balance_bonus",
+        str(args.reward_balance_bonus),
+        "--reward_redundancy_threshold",
+        str(args.reward_redundancy_threshold),
+        "--reward_redundancy_coef",
+        str(args.reward_redundancy_coef),
+        "--reward_reject_low_ic",
+        str(args.reward_reject_low_ic),
+        "--reward_reject_redundant",
+        str(args.reward_reject_redundant),
+        "--reward_reject_no_improve",
+        str(args.reward_reject_no_improve),
         "--device",
         args.device,
         "--seed",
@@ -339,6 +357,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--commission", type=float, default=0.001)
     parser.add_argument("--benchmark_code", default="000300.SH")
     parser.add_argument("--gamma", type=float, default=0.99)
+    # ── 多目标奖励函数参数 ──
+    parser.add_argument("--reward_ic_weight", type=float, default=10.0)
+    parser.add_argument("--reward_icir_weight", type=float, default=3.0)
+    parser.add_argument("--reward_rank_ic_weight", type=float, default=2.0)
+    parser.add_argument("--reward_balance_bonus", type=float, default=0.05)
+    parser.add_argument("--reward_redundancy_threshold", type=float, default=0.7)
+    parser.add_argument("--reward_redundancy_coef", type=float, default=0.5)
+    parser.add_argument("--reward_reject_low_ic", type=float, default=-0.2)
+    parser.add_argument("--reward_reject_redundant", type=float, default=-0.15)
+    parser.add_argument("--reward_reject_no_improve", type=float, default=-0.1)
     parser.add_argument(
         "--device",
         default="cuda" if torch is not None and torch.cuda.is_available() else "cpu",

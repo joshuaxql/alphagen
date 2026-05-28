@@ -12,13 +12,10 @@ mindmap
   root((AlphaGen 数据管道))
     1 数据层
       Data 类
-        CSV 日线数据加载
         复权处理
         ST 股过滤
         北交所过滤
-        交易日历加载
       StockData 类
-        DataFrame 转矩阵
         6个特征矩阵
         计算未来收益率
     2 词表与表达式
@@ -39,22 +36,22 @@ mindmap
         禁止冗余嵌套
         剩余token检查
     4 策略网络
-      LSTM 架构
+      LSTM 架构 lstm.py
         Embedding 32维
         2层LSTM
         Policy Head
         Value Head
-      Transformer 架构
+      Transformer 架构 transformer.py
         Embedding 64维
         位置编码
         3层Encoder
         因果掩码
     5 强化学习Agent
-      PPOAgent
+      PPOAgent ppo.py
         Monte Carlo优势估计
         裁剪目标
         熵正则化
-      GRPOAgent
+      GRPOAgent grpo.py
         组内归一化奖励
         KL正则化
         参考模型
@@ -68,9 +65,6 @@ mindmap
     7 组合模型
       AlphaCombinationModel
         因子池管理
-        权重优化
-        因子接纳拒绝
-        淘汰机制
     8 训练管线
       train函数
         Episode收集
@@ -80,11 +74,8 @@ mindmap
     9 评估与回测
       reporting
         因子指标
-        可视化
       backtest
         Top-k策略
-        绩效指标
-        基准对比
     10 批量实验
       batch_train
         消融实验编排
@@ -280,8 +271,12 @@ alphagen/
 ├── expression.py              # 表达式树与 RPN 解析
 ├── masking.py                 # RPN 合法动作掩码
 ├── calculator.py              # Alpha 因子计算引擎 + IC 计算
-├── generator.py               # LSTM 策略网络 + PPO/GRPO Agent
-├── generator_transformer.py   # Transformer 策略网络
+├── lstm.py                    # LSTM 策略网络 (AlphaGenNet)
+├── transformer.py             # Transformer 策略网络
+├── episode.py                 # Episode 数据结构
+├── ppo.py                     # PPO Agent
+├── grpo.py                    # GRPO Agent
+├── generator.py               # 兼容性包装器（LSTM + Transformer + Agents）
 ├── combination.py             # Alpha 组合模型（因子池管理）
 ├── train.py                   # 主训练管线 + CLI 入口
 ├── backtest.py                # 回测引擎
@@ -375,6 +370,20 @@ python batch_train_compare.py \
 | `value_coef`      | 0.5    | 值函数损失系数                     |
 | `grpo_group_size` | 64     | GRPO 组大小                        |
 | `grpo_kl_coef`    | 0.04   | GRPO KL 正则化系数                 |
+
+### 多目标奖励函数参数（`--reward_mode multi`）
+
+| 参数                          | 默认值 | 说明                   |
+| ----------------------------- | ------ | ---------------------- |
+| `reward_ic_weight`            | 10.0   | IC 增量权重            |
+| `reward_icir_weight`          | 3.0    | ICIR 增量权重          |
+| `reward_rank_ic_weight`       | 2.0    | Rank IC 权重           |
+| `reward_balance_bonus`        | 0.05   | 正负平衡奖励           |
+| `reward_redundancy_threshold` | 0.7    | 冗余惩罚阈值（互相关） |
+| `reward_redundancy_coef`      | 0.5    | 冗余惩罚系数           |
+| `reward_reject_low_ic`        | -0.2   | 拒绝低IC的惩罚         |
+| `reward_reject_redundant`     | -0.15  | 拒绝冗余因子的惩罚     |
+| `reward_reject_no_improve`    | -0.1   | 拒绝无提升因子的惩罚   |
 
 ---
 
