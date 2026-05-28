@@ -14,7 +14,6 @@ from typing import Any, Iterable, Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 MODEL_LABELS = {"rnn": "lstm", "transformer": "transformer"}
-ADVANTAGE_LABELS = {"mc": "mc_adv", "gae": "gae_adv"}
 REWARD_LABELS = {"simple": "simple_reward", "multi": "multi_reward"}
 
 try:
@@ -28,14 +27,12 @@ class ExperimentSpec:
     name: str
     model_arg: str
     model_label: str
-    advantage_mode: str
     reward_mode: str
     seed: int
 
 
 def build_experiment_specs(
     models: Sequence[str],
-    advantage_modes: Sequence[str],
     reward_modes: Sequence[str],
     seeds: Sequence[int],
 ) -> list[ExperimentSpec]:
@@ -44,25 +41,22 @@ def build_experiment_specs(
 
     for model_arg in models:
         model_label = MODEL_LABELS[model_arg]
-        for advantage_mode in advantage_modes:
-            advantage_label = ADVANTAGE_LABELS[advantage_mode]
-            for reward_mode in reward_modes:
-                reward_label = REWARD_LABELS[reward_mode]
-                for seed in seeds:
-                    seed_suffix = f"_seed{seed}" if multi_seed else ""
-                    specs.append(
-                        ExperimentSpec(
-                            name=(
-                                f"{model_label}_{advantage_label}_{reward_label}"
-                                f"{seed_suffix}"
-                            ),
-                            model_arg=model_arg,
-                            model_label=model_label,
-                            advantage_mode=advantage_mode,
-                            reward_mode=reward_mode,
-                            seed=seed,
-                        )
+        for reward_mode in reward_modes:
+            reward_label = REWARD_LABELS[reward_mode]
+            for seed in seeds:
+                seed_suffix = f"_seed{seed}" if multi_seed else ""
+                specs.append(
+                    ExperimentSpec(
+                        name=(
+                            f"{model_label}_{reward_label}"
+                            f"{seed_suffix}"
+                        ),
+                        model_arg=model_arg,
+                        model_label=model_label,
+                        reward_mode=reward_mode,
+                        seed=seed,
                     )
+                )
     return specs
 
 
@@ -105,7 +99,6 @@ def collect_experiment_result(
         "experiment": spec.name,
         "model": spec.model_label,
         "model_arg": spec.model_arg,
-        "advantage_mode": spec.advantage_mode,
         "reward_mode": spec.reward_mode,
         "seed": spec.seed,
         "status": status or ("ok" if return_code == 0 else "failed"),
@@ -183,10 +176,6 @@ def build_train_command(
         str(save_dir),
         "--gamma",
         str(args.gamma),
-        "--gae_lambda",
-        str(args.gae_lambda),
-        "--advantage_mode",
-        spec.advantage_mode,
         "--reward_mode",
         spec.reward_mode,
         "--device",
@@ -262,16 +251,15 @@ def write_markdown_report(path: Path, results: Sequence[dict[str, Any]]) -> None
         "",
         f"Generated at: {time.strftime('%Y-%m-%d %H:%M:%S')}",
         "",
-        "| Experiment | Model | Advantage | Reward | Seed | Status | Best Val IC | Best Val ICIR | Final Val IC | Strategy Sharpe | Excess Ann Return |",
-        "| --- | --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
+        "| Experiment | Model | Reward | Seed | Status | Best Val IC | Best Val ICIR | Final Val IC | Strategy Sharpe | Excess Ann Return |",
+        "| --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
 
     for row in _sort_results(results):
         lines.append(
-            "| {experiment} | {model} | {advantage_mode} | {reward_mode} | {seed} | {status} | {best_val_ic} | {best_val_icir} | {final_val_ic} | {strategy_sharpe} | {excess_ann} |".format(
+            "| {experiment} | {model} | {reward_mode} | {seed} | {status} | {best_val_ic} | {best_val_icir} | {final_val_ic} | {strategy_sharpe} | {excess_ann} |".format(
                 experiment=row.get("experiment", ""),
                 model=row.get("model", ""),
-                advantage_mode=row.get("advantage_mode", ""),
                 reward_mode=row.get("reward_mode", ""),
                 seed=row.get("seed", ""),
                 status=row.get("status", ""),
@@ -351,7 +339,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--commission", type=float, default=0.001)
     parser.add_argument("--benchmark_code", default="000300.SH")
     parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--gae_lambda", type=float, default=0.95)
     parser.add_argument(
         "--device",
         default="cuda" if torch is not None and torch.cuda.is_available() else "cpu",
@@ -366,12 +353,6 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         choices=["rnn", "transformer"],
         default=["rnn", "transformer"],
-    )
-    parser.add_argument(
-        "--advantage_modes",
-        nargs="+",
-        choices=["mc", "gae"],
-        default=["mc", "gae"],
     )
     parser.add_argument(
         "--reward_modes",
@@ -399,7 +380,6 @@ def main() -> int:
     args = parse_args()
     specs = build_experiment_specs(
         models=args.models,
-        advantage_modes=args.advantage_modes,
         reward_modes=args.reward_modes,
         seeds=args.seeds,
     )
@@ -424,7 +404,6 @@ def main() -> int:
                 {
                     "experiment": spec.name,
                     "model": spec.model_label,
-                    "advantage_mode": spec.advantage_mode,
                     "reward_mode": spec.reward_mode,
                     "seed": spec.seed,
                     "status": "dry_run",

@@ -127,8 +127,6 @@ class PPOAgent:
         batch_size: int = 64,
         device: str = "cpu",
         gamma: float = 0.99,
-        gae_lambda: float = 0.95,
-        advantage_mode: str = "gae",
     ):
         self.net = net.to(device)
         self.optimizer = torch.optim.Adam(net.parameters(), lr=lr)
@@ -140,8 +138,6 @@ class PPOAgent:
         self.batch_size = batch_size
         self.device = device
         self.gamma = gamma
-        self.gae_lambda = gae_lambda
-        self.advantage_mode = advantage_mode
 
     @torch.no_grad()
     def select_action(self, token_idx: int, valid_mask: np.ndarray, hidden):
@@ -163,28 +159,16 @@ class PPOAgent:
     def _compute_episode_advantages(
         self, ep_rewards: np.ndarray, ep_values: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray]:
-        """为单个 episode 计算 returns 与 advantages。"""
+        """为单个 episode 计算 returns 与 advantages（Monte Carlo 模式）。"""
         n = len(ep_values)
         if n == 0:
             empty = np.zeros(0, dtype=np.float32)
             return empty, empty
 
-        if self.advantage_mode == "gae":
-            advantages_ep = np.zeros(n, dtype=np.float32)
-            gae = 0.0
-            for t in reversed(range(n)):
-                next_value = 0.0 if t == n - 1 else ep_values[t + 1]
-                delta = ep_rewards[t] + self.gamma * next_value - ep_values[t]
-                gae = delta + self.gamma * self.gae_lambda * gae
-                advantages_ep[t] = gae
-            returns_ep = advantages_ep + ep_values
-        elif self.advantage_mode == "mc":
-            # 兼容旧版基线：episode 中每个 step 共享最终 reward。
-            final_reward = float(ep_rewards[-1])
-            returns_ep = np.full(n, final_reward, dtype=np.float32)
-            advantages_ep = returns_ep - ep_values
-        else:
-            raise ValueError(f"Unknown advantage_mode: {self.advantage_mode}")
+        # Monte Carlo: episode 中每个 step 共享最终 reward
+        final_reward = float(ep_rewards[-1])
+        returns_ep = np.full(n, final_reward, dtype=np.float32)
+        advantages_ep = returns_ep - ep_values
 
         if n > 1:
             adv_std = advantages_ep.std()
@@ -194,11 +178,7 @@ class PPOAgent:
         return returns_ep.astype(np.float32), advantages_ep.astype(np.float32)
 
     def update(self, episodes: List[Episode]):
-        """PPO 多 epoch 更新。
-
-        `advantage_mode="gae"` 使用广义优势估计；
-        `advantage_mode="mc"` 使用旧版 Monte Carlo 风格回报作为对照基线。
-        """
+        """PPO 多 epoch 更新（使用 Monte Carlo 风格回报）。"""
         if not episodes:
             return {}
 
@@ -240,7 +220,7 @@ class PPOAgent:
             padded[i, : len(seq)] = torch.tensor(seq, dtype=torch.long)
             lengths[i] = len(seq)
 
-        # ── 前向传播获取所有 step 的 value（no_grad 用于 GAE 计算）──
+        # ── 前向传播获取所有 step 的 value（no_grad 用于 advantage 计算）──
         with torch.no_grad():
             _, all_values_out = self.net.forward_sequence(padded, lengths)
             last_idx_full = (lengths - 1).long().to(self.device)
@@ -339,8 +319,6 @@ class PPOAgent:
             "ppo_epochs": self.ppo_epochs,
             "batch_size": self.batch_size,
             "gamma": self.gamma,
-            "gae_lambda": self.gae_lambda,
-            "advantage_mode": self.advantage_mode,
         }
 
     def load_state_dict(self, state: dict) -> None:
@@ -354,8 +332,6 @@ class PPOAgent:
         self.ppo_epochs = state["ppo_epochs"]
         self.batch_size = state["batch_size"]
         self.gamma = state["gamma"]
-        self.gae_lambda = state["gae_lambda"]
-        self.advantage_mode = state.get("advantage_mode", "gae")
 
 
 class GRPOAgent(PPOAgent):

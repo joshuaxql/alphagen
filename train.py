@@ -285,8 +285,6 @@ def train(
     device: str = "cpu",
     save_dir: str = "checkpoints",
     gamma: float = 0.99,
-    gae_lambda: float = 0.95,
-    advantage_mode: str = "gae",
     reward_mode: str = "multi",
     model_type: str = "rnn",
     rl_algo: str = "ppo",
@@ -346,8 +344,6 @@ def train(
             lr=lr,
             device=device,
             gamma=gamma,
-            gae_lambda=gae_lambda,
-            advantage_mode=advantage_mode,
         )
         print("RL 算法: PPO")
 
@@ -405,7 +401,6 @@ def train(
     print(f"开始训练: {num_iterations} 轮, 每轮 {episodes_per_iter} episode")
     print(f"设备: {device}, 股票数: {stock_data.n_stocks}, 交易日: {stock_data.n_days}")
     print("股票过滤: 默认排除北交所(BJ)和ST股票")
-    print(f"优势估计: {advantage_mode}")
     print(f"奖励函数: {reward_mode}")
     if val_data_context is not None:
         print(
@@ -609,7 +604,6 @@ def train(
     )
     summary = {
         "best_selection_score": float(best_score) if np.isfinite(best_score) else None,
-        "advantage_mode": advantage_mode,
         "reward_mode": reward_mode,
         "model_type": model_type,
         "final_train_metrics": final_train_metrics,
@@ -865,19 +859,7 @@ def main():
         "--gamma",
         type=float,
         default=0.99,
-        help="[GAE] discount factor / [MC] 保留为兼容参数",
-    )
-    parser.add_argument(
-        "--gae_lambda",
-        type=float,
-        default=0.95,
-        help="[GAE] lambda 参数；advantage_mode=mc 时忽略",
-    )
-    parser.add_argument(
-        "--advantage_mode",
-        choices=["gae", "mc"],
-        default="gae",
-        help="优势估计方式: gae 或 mc(旧版 Monte Carlo 基线)",
+        help="折扣因子 gamma",
     )
     parser.add_argument(
         "--reward_mode",
@@ -988,8 +970,6 @@ def main():
         device=args.device,
         save_dir=args.save_dir,
         gamma=args.gamma,
-        gae_lambda=args.gae_lambda,
-        advantage_mode=args.advantage_mode,
         reward_mode=args.reward_mode,
         model_type=args.model,
         rl_algo=args.rl_algo,
