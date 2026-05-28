@@ -8,6 +8,13 @@
   4. 保存最终 alpha 池
 """
 
+# 在导入任何可能触发 OpenMP 的库之前设置环境变量，
+# 避免 Windows 下 libiomp5md.dll 重复初始化导致的崩溃。
+# 注意：这是一个常见的开发/调试绕过；若用于生产应通过确保只链接单一 OpenMP 运行时来解决。
+import os
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
+
 import os
 import json
 import time
@@ -34,7 +41,7 @@ from expression import (
 from calculator import StockData, calc_rank_ic
 from combination import AlphaCombinationModel
 from masking import RPNBuilder
-from generator import PPOAgent, Episode
+from generator import PPOAgent, GRPOAgent, Episode
 from data import Data
 from common import ADJUST_PREV
 from reporting import (
@@ -282,6 +289,9 @@ def train(
     advantage_mode: str = "gae",
     reward_mode: str = "multi",
     model_type: str = "rnn",
+    rl_algo: str = "ppo",
+    grpo_group_size: int = 64,
+    grpo_kl_coef: float = 0.04,
     # Transformer 专用参数
     tf_embed_dim: int = 64,
     tf_nhead: int = 4,
@@ -320,14 +330,26 @@ def train(
         net = AlphaGenNet(vocab_size=VOCAB_SIZE)
         print(f"模型: LSTM (embed_dim=32, hidden_dim=128, num_layers=2)")
 
-    agent = PPOAgent(
-        net,
-        lr=lr,
-        device=device,
-        gamma=gamma,
-        gae_lambda=gae_lambda,
-        advantage_mode=advantage_mode,
-    )
+    # 根据选择的 RL 算法实例化 Agent
+    if rl_algo == "grpo":
+        agent = GRPOAgent(
+            net,
+            lr=lr,
+            device=device,
+            group_size=grpo_group_size,
+            kl_coef=grpo_kl_coef,
+        )
+        print(f"RL 算法: GRPO (group_size={grpo_group_size}, kl_coef={grpo_kl_coef})")
+    else:
+        agent = PPOAgent(
+            net,
+            lr=lr,
+            device=device,
+            gamma=gamma,
+            gae_lambda=gae_lambda,
+            advantage_mode=advantage_mode,
+        )
+        print("RL 算法: PPO")
 
     builder = RPNBuilder(max_len=max_seq_len)
     val_evaluator = (
@@ -886,6 +908,24 @@ def main():
         default="rnn",
         help="策略网络类型: rnn (LSTM, 默认) 或 transformer",
     )
+    parser.add_argument(
+        "--rl_algo",
+        choices=["ppo", "grpo"],
+        default="ppo",
+        help="强化学习算法: ppo 或 grpo",
+    )
+    parser.add_argument(
+        "--grpo_group_size",
+        type=int,
+        default=64,
+        help="GRPO: 每个组的采样数量 G",
+    )
+    parser.add_argument(
+        "--grpo_kl_coef",
+        type=float,
+        default=0.04,
+        help="GRPO: KL 正则化系数 beta",
+    )
     # ── Transformer 专用参数 ──
     parser.add_argument(
         "--tf_embed_dim", type=int, default=64, help="[Transformer] embedding 维度"
@@ -952,6 +992,9 @@ def main():
         advantage_mode=args.advantage_mode,
         reward_mode=args.reward_mode,
         model_type=args.model,
+        rl_algo=args.rl_algo,
+        grpo_group_size=args.grpo_group_size,
+        grpo_kl_coef=args.grpo_kl_coef,
         tf_embed_dim=args.tf_embed_dim,
         tf_nhead=args.tf_nhead,
         tf_num_layers=args.tf_num_layers,
