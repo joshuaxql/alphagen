@@ -14,6 +14,7 @@ from typing import Any, Iterable, Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 MODEL_LABELS = {"rnn": "lstm", "transformer": "transformer"}
+RL_ALGO_LABELS = {"ppo": "ppo", "grpo": "grpo"}
 REWARD_LABELS = {"simple": "simple_reward", "multi": "multi_reward"}
 
 try:
@@ -27,12 +28,14 @@ class ExperimentSpec:
     name: str
     model_arg: str
     model_label: str
+    rl_algo: str
     reward_mode: str
     seed: int
 
 
 def build_experiment_specs(
     models: Sequence[str],
+    rl_algos: Sequence[str],
     reward_modes: Sequence[str],
     seeds: Sequence[int],
 ) -> list[ExperimentSpec]:
@@ -41,22 +44,25 @@ def build_experiment_specs(
 
     for model_arg in models:
         model_label = MODEL_LABELS[model_arg]
-        for reward_mode in reward_modes:
-            reward_label = REWARD_LABELS[reward_mode]
-            for seed in seeds:
-                seed_suffix = f"_seed{seed}" if multi_seed else ""
-                specs.append(
-                    ExperimentSpec(
-                        name=(
-                            f"{model_label}_{reward_label}"
-                            f"{seed_suffix}"
-                        ),
-                        model_arg=model_arg,
-                        model_label=model_label,
-                        reward_mode=reward_mode,
-                        seed=seed,
+        for rl_algo in rl_algos:
+            rl_algo_label = RL_ALGO_LABELS[rl_algo]
+            for reward_mode in reward_modes:
+                reward_label = REWARD_LABELS[reward_mode]
+                for seed in seeds:
+                    seed_suffix = f"_seed{seed}" if multi_seed else ""
+                    specs.append(
+                        ExperimentSpec(
+                            name=(
+                                f"{model_label}_{rl_algo_label}_{reward_label}"
+                                f"{seed_suffix}"
+                            ),
+                            model_arg=model_arg,
+                            model_label=model_label,
+                            rl_algo=rl_algo,
+                            reward_mode=reward_mode,
+                            seed=seed,
+                        )
                     )
-                )
     return specs
 
 
@@ -99,6 +105,7 @@ def collect_experiment_result(
         "experiment": spec.name,
         "model": spec.model_label,
         "model_arg": spec.model_arg,
+        "rl_algo": spec.rl_algo,
         "reward_mode": spec.reward_mode,
         "seed": spec.seed,
         "status": status or ("ok" if return_code == 0 else "failed"),
@@ -143,7 +150,7 @@ def collect_experiment_result(
 def build_train_command(
     args: argparse.Namespace, spec: ExperimentSpec, save_dir: Path
 ) -> list[str]:
-    return [
+    command = [
         sys.executable,
         "train.py",
         "--train_start",
@@ -178,6 +185,13 @@ def build_train_command(
         str(args.gamma),
         "--reward_mode",
         spec.reward_mode,
+    ]
+
+    # 如果指定了预设，添加 --reward_preset 参数
+    if args.reward_preset is not None:
+        command.extend(["--reward_preset", args.reward_preset])
+
+    command.extend([
         "--reward_ic_weight",
         str(args.reward_ic_weight),
         "--reward_icir_weight",
@@ -202,6 +216,8 @@ def build_train_command(
         str(spec.seed),
         "--model",
         spec.model_arg,
+        "--rl_algo",
+        spec.rl_algo,
         "--tf_embed_dim",
         str(args.tf_embed_dim),
         "--tf_nhead",
@@ -212,7 +228,9 @@ def build_train_command(
         str(args.tf_dim_feedforward),
         "--tf_dropout",
         str(args.tf_dropout),
-    ]
+    ])
+
+    return command
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -269,15 +287,16 @@ def write_markdown_report(path: Path, results: Sequence[dict[str, Any]]) -> None
         "",
         f"Generated at: {time.strftime('%Y-%m-%d %H:%M:%S')}",
         "",
-        "| Experiment | Model | Reward | Seed | Status | Best Val IC | Best Val ICIR | Final Val IC | Strategy Sharpe | Excess Ann Return |",
-        "| --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
+        "| Experiment | Model | RL Algo | Reward | Seed | Status | Best Val IC | Best Val ICIR | Final Val IC | Strategy Sharpe | Excess Ann Return |",
+        "| --- | --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
 
     for row in _sort_results(results):
         lines.append(
-            "| {experiment} | {model} | {reward_mode} | {seed} | {status} | {best_val_ic} | {best_val_icir} | {final_val_ic} | {strategy_sharpe} | {excess_ann} |".format(
+            "| {experiment} | {model} | {rl_algo} | {reward_mode} | {seed} | {status} | {best_val_ic} | {best_val_icir} | {final_val_ic} | {strategy_sharpe} | {excess_ann} |".format(
                 experiment=row.get("experiment", ""),
                 model=row.get("model", ""),
+                rl_algo=row.get("rl_algo", ""),
                 reward_mode=row.get("reward_mode", ""),
                 seed=row.get("seed", ""),
                 status=row.get("status", ""),
@@ -383,10 +402,22 @@ def parse_args() -> argparse.Namespace:
         default=["rnn", "transformer"],
     )
     parser.add_argument(
+        "--rl_algos",
+        nargs="+",
+        choices=["ppo", "grpo"],
+        default=["ppo", "grpo"],
+    )
+    parser.add_argument(
         "--reward_modes",
         nargs="+",
         choices=["simple", "multi"],
         default=["simple", "multi"],
+    )
+    parser.add_argument(
+        "--reward_preset",
+        choices=["default", "fast", "fine_tune", "production", "aggressive", "conservative"],
+        default=None,
+        help="奖励函数预设配置（覆盖单独参数）",
     )
     parser.add_argument("--save_root", default="output/batch_compare")
     parser.add_argument("--run_name", default=_default_run_name())
@@ -406,8 +437,25 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+
+    # 处理奖励预设
+    if args.reward_preset is not None:
+        from reward_config import get_preset
+        preset = get_preset(args.reward_preset)
+        args.reward_ic_weight = preset.ic_weight
+        args.reward_icir_weight = preset.icir_weight
+        args.reward_rank_ic_weight = preset.rank_ic_weight
+        args.reward_balance_bonus = preset.balance_bonus
+        args.reward_redundancy_threshold = preset.redundancy_threshold
+        args.reward_redundancy_coef = preset.redundancy_coef
+        args.reward_reject_low_ic = preset.reject_low_ic
+        args.reward_reject_redundant = preset.reject_redundant
+        args.reward_reject_no_improve = preset.reject_no_improve
+        print(f"使用奖励预设: {args.reward_preset}")
+
     specs = build_experiment_specs(
         models=args.models,
+        rl_algos=args.rl_algos,
         reward_modes=args.reward_modes,
         seeds=args.seeds,
     )
@@ -432,6 +480,7 @@ def main() -> int:
                 {
                     "experiment": spec.name,
                     "model": spec.model_label,
+                    "rl_algo": spec.rl_algo,
                     "reward_mode": spec.reward_mode,
                     "seed": spec.seed,
                     "status": "dry_run",

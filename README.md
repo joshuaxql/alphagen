@@ -345,11 +345,20 @@ python backtest.py \
 ### 批量消融实验
 
 ```bash
+# 模型 × RL算法 × 奖励函数 消融
 python batch_train_compare.py \
     --models rnn transformer \
+    --rl_algos ppo grpo \
     --reward_modes simple multi \
     --seeds 42 123 456 \
     --iterations 50
+
+# 只测试 GRPO
+python batch_train_compare.py \
+    --models rnn \
+    --rl_algos grpo \
+    --reward_modes multi \
+    --seeds 42
 ```
 
 ---

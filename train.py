@@ -899,6 +899,13 @@ def main():
         default="multi",
         help="奖励函数: simple=仅IC增量, multi=多目标奖励",
     )
+    # ── 奖励预设 ──
+    parser.add_argument(
+        "--reward_preset",
+        choices=["default", "fast", "fine_tune", "production", "aggressive", "conservative"],
+        default=None,
+        help="奖励函数预设配置（覆盖单独参数）",
+    )
     # ── 多目标奖励函数参数 ──
     parser.add_argument(
         "--reward_ic_weight",
@@ -1013,6 +1020,24 @@ def main():
     )
     args = parser.parse_args()
     set_random_seed(args.seed)
+
+    # 处理奖励预设
+    if args.reward_preset is not None:
+        from reward_config import get_preset
+        preset = get_preset(args.reward_preset)
+        args.reward_ic_weight = preset.ic_weight
+        args.reward_icir_weight = preset.icir_weight
+        args.reward_rank_ic_weight = preset.rank_ic_weight
+        args.reward_balance_bonus = preset.balance_bonus
+        args.reward_redundancy_threshold = preset.redundancy_threshold
+        args.reward_redundancy_coef = preset.redundancy_coef
+        args.reward_reject_low_ic = preset.reject_low_ic
+        args.reward_reject_redundant = preset.reject_redundant
+        args.reward_reject_no_improve = preset.reject_no_improve
+        print(f"使用奖励预设: {args.reward_preset}")
+        print(preset.summary())
+        print()
+
     save_config(args, args.save_dir)
 
     print("加载训练集数据...")
