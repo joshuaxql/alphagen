@@ -12,6 +12,7 @@
 # 避免 Windows 下 libiomp5md.dll 重复初始化导致的崩溃。
 # 注意：这是一个常见的开发/调试绕过；若用于生产应通过确保只链接单一 OpenMP 运行时来解决。
 import os
+
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 
@@ -238,12 +239,16 @@ def evaluate_episode(
                 # 取最后一个因子（刚加入的）与池中其他因子的最大互相关
                 last_idx = combination.pool_size - 1
                 max_mutual = (
-                    max(abs(combination.ic_matrix[last_idx, j]) for j in range(last_idx))
+                    max(
+                        abs(combination.ic_matrix[last_idx, j]) for j in range(last_idx)
+                    )
                     if last_idx > 0
                     else 0.0
                 )
                 if max_mutual > reward_redundancy_threshold:
-                    redundancy_penalty = (max_mutual - reward_redundancy_threshold) * reward_redundancy_coef
+                    redundancy_penalty = (
+                        max_mutual - reward_redundancy_threshold
+                    ) * reward_redundancy_coef
 
             reward = (
                 reward_ic_weight * ic_delta
@@ -899,13 +904,6 @@ def main():
         default="multi",
         help="奖励函数: simple=仅IC增量, multi=多目标奖励",
     )
-    # ── 奖励预设 ──
-    parser.add_argument(
-        "--reward_preset",
-        choices=["default", "fast", "fine_tune", "production", "aggressive", "conservative"],
-        default=None,
-        help="奖励函数预设配置（覆盖单独参数）",
-    )
     # ── 多目标奖励函数参数 ──
     parser.add_argument(
         "--reward_ic_weight",
@@ -1020,23 +1018,6 @@ def main():
     )
     args = parser.parse_args()
     set_random_seed(args.seed)
-
-    # 处理奖励预设
-    if args.reward_preset is not None:
-        from reward_config import get_preset
-        preset = get_preset(args.reward_preset)
-        args.reward_ic_weight = preset.ic_weight
-        args.reward_icir_weight = preset.icir_weight
-        args.reward_rank_ic_weight = preset.rank_ic_weight
-        args.reward_balance_bonus = preset.balance_bonus
-        args.reward_redundancy_threshold = preset.redundancy_threshold
-        args.reward_redundancy_coef = preset.redundancy_coef
-        args.reward_reject_low_ic = preset.reject_low_ic
-        args.reward_reject_redundant = preset.reject_redundant
-        args.reward_reject_no_improve = preset.reject_no_improve
-        print(f"使用奖励预设: {args.reward_preset}")
-        print(preset.summary())
-        print()
 
     save_config(args, args.save_dir)
 
